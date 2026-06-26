@@ -91,6 +91,7 @@ Save them where they need to live; if a supervising process expects them in a sp
 - **Runtime permissions.** For a permission-gated feature you can pre-grant on the device with `xcrun simctl privacy <udid> grant <service> <bundle-id>` (services: `reminders`, `calendar`, `contacts`, `photos`, `location`, `microphone`, `camera`, and more) - but remember the ephemeral-clone caveat: when driving through `xcodebuild test`, accept the live permission alert inside the test instead, or the clone will not have the grant.
 - **Reminders / Calendar need a default list first.** On a brand-new simulator, `EKEventStore.defaultCalendarForNewReminders()` returns nil until the Reminders app has been opened once and its welcome completed - so a write silently no-ops even with permission granted. Open Reminders once (it creates the default list) before exercising any reminder-writing feature. This is a simulator-only artifact; real devices always have a default list.
 - **Jump to a screen with launch arguments.** `app.launchArguments = ["-someState", "value"]` (or `simctl launch <udid> <bundle-id> -someState value`) lands you on a deep screen without tapping through everything before it.
+- **Run one simulator at a time.** Several booted simulators at once can wedge `CoreSimulator`, and the test runner is then denied launch with `FBSOpenApplicationServiceErrorDomain Code=1` ("request denied by SBMainWorkspace") - which looks like a test failure but is not one. Shut down the extras (`simctl shutdown all`), and if it stays wedged, kill `com.apple.CoreSimulator.CoreSimulatorService` (`pkill -f CoreSimulatorService`) and reboot the target before retrying. This matters most when several drive jobs might run concurrently - serialize them.
 
 ## Locating elements
 
@@ -114,3 +115,4 @@ Remove the throwaway test and any debug instrumentation before you finish, so no
 - Reminders/Calendar write no-ops on a fresh sim -> open Reminders once to create the default list.
 - Text content is a `TextField.value`, not a `staticText` -> match with a value predicate.
 - Pass `-resultBundlePath` so you can find the `.xcresult` to export from.
+- One simulator at a time -> several booted sims wedge CoreSimulator and deny the runner launch (`FBSOpenApplication Code=1`), which masquerades as a test failure; serialize, and kill `CoreSimulatorService` if wedged.
