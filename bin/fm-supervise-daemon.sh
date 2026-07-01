@@ -13,12 +13,11 @@
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
 # the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full per-wake responsiveness.
-# When afk is off, the daemon stays quiet — it self-handles routine wakes and
-# buffers escalations without injecting, so the base one-shot fm-watch.sh
-# protocol is the active mechanism. Escalations that arrive while afk is off
-# survive in state/.subsuper-escalations and are flushed on the next
-# "while you were out" catch-up or when afk is re-entered.
+# user message clears it and firstmate resumes full responsiveness.
+# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
+# Any buffered daemon escalations that remain while afk is off survive in
+# state/.subsuper-escalations and are flushed on the next "while you were out"
+# catch-up or when afk is re-entered.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
 # FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
@@ -28,11 +27,13 @@
 # The marker and the busy-guard solve the same problem — the daemon and the
 # human share one input channel — so they live together under /afk.
 #
-# Reliability model (see AGENTS.md §8):
-#   - Nothing is lost: the #29 watcher enqueues every wake to state/.wake-queue
-#     BEFORE advancing its suppression markers, so a crash/restart/missed
-#     injection is recovered on the next fm-wake-drain.sh. The daemon does not
-#     touch the queue; it only reads the watcher's stdout reason.
+# Reliability model (see the /afk skill):
+#   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
+#     to daemon-owned one-shot behavior and enqueues every wake to
+#     state/.wake-queue BEFORE advancing its suppression markers, so a
+#     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
+#     The daemon does not touch the queue; it only reads the watcher's stdout
+#     reason.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane is escalated only after it has been
@@ -40,12 +41,15 @@
 #     crewmate is therefore detected within STALE_ESCALATE_SECS + a tick, never
 #     lost. Crewmates are autonomous, so a delayed stale response does not stall
 #     a healthy crewmate's own progress.
+#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
+#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
+#     writes state/.subsuper-inject-wedged if submit still cannot be confirmed.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
 #
 # The robustness shell from the prior always-inject version is preserved:
-# single-instance lock (portable mkdir-based, no flock dependency), crash-loop
+# single-instance lock (portable helper, no flock dependency), crash-loop
 # backoff, pane-gone guard, and a signal-trapped shutdown that flushes buffered
 # escalations before exit.
 #
@@ -69,17 +73,27 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
-#          FM_COMPOSER_IDLE_RE       regex matching an empty composer (idle
-#                                   prompt); non-match on the cursor line means
-#                                   pending input (default: bare prompts + busy
-#                                   footers)
+#          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
+#                                   and structural border stripping (default:
+#                                   bare prompt glyphs plus busy footers)
+#          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
+#                                   undelivered before one normal flush attempt;
+#                                   if that cannot confirm a submit, a wedge
+#                                   alarm fires (default 300; 0 disables)
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
-#                                   Enter is retried
+#                                   Enter is retried. Composer-empty detection is
+#                                   structural and style-aware (bin/fm-tmux-lib.sh):
+#                                   it drops dim/faint ghost text and strips the
+#                                   harness's box borders before deciding, so a
+#                                   ghost-only or bordered-but-empty composer is
+#                                   not misread as pending input.
+#          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
+#                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
-#          instance via portable mkdir lock on state/.supervise-daemon.lock. Trapped
+#          instance via portable lock on state/.supervise-daemon.lock. Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
 #          lock. A crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
@@ -89,6 +103,19 @@ FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared tmux pane primitives (busy/composer detection + verify-retry submit).
+# Sourced at top level so BOTH the executed daemon and the unit tests (which
+# source this file for its pure functions) get the corrected composer detection.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$FM_DAEMON_DIR/fm-tmux-lib.sh"
+
+# Shared wake classifier (last_status_line, status_is_captain_relevant,
+# window_to_task, scan_captain_relevant_statuses). The SAME library backs the
+# always-on watcher's triage, so the captain-relevant verb set and the
+# classification predicates have exactly one definition.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$FM_DAEMON_DIR/fm-classify-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 INJECT_SKIP_DEFAULT="heartbeat"
@@ -96,17 +123,16 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
-# Busy signatures per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...".
-BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
-CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
-# Patterns that indicate an EMPTY composer (idle pane, no pending input). Used by
-# pane_input_pending to distinguish "bare prompt, nothing typed" from "human
-# mid-typing." The cursor/input line is checked against this regex: a match means
-# the composer is empty (safe to inject); a non-match with non-whitespace content
-# means there is pending input (defer). Err on the side of treating unrecognized
-# content as pending (false positives are cheap — just a deferred cycle).
-COMPOSER_IDLE_RE_DEFAULT='^[[:space:]]*(\$|>|❯|%|#)[[:space:]]*$|esc (to )?interrupt|Working\.\.\.'
+# Max time a buffered escalation may sit undelivered before the daemon retries
+# the normal flush path and, if that cannot confirm a submit, raises a loud wedge
+# alarm. The escape hatch makes a guard false-positive visible instead of silent.
+MAX_DEFER_SECS_DEFAULT=300
+# The captain-relevant verb set and the status classifiers (last_status_line,
+# status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
+# live in bin/fm-classify-lib.sh, shared with the always-on watcher.
+# Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
+# (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
+# overrides the busy set here, as before.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -238,26 +264,11 @@ discover_supervisor_target() {
 }
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
-# Return the last non-blank line of a status file (empty if missing/blank).
-last_status_line() {
-  local f=$1
-  [ -e "$f" ] || return 0
-  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
-}
-
-# 0 if the given (last) status line matches a captain-relevant verb.
-status_is_captain_relevant() {
-  local line=$1
-  [ -n "$line" ] || return 1
-  printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$CAPTAIN_RE_DEFAULT}"
-}
-
-# task id from a tmux window name "<session>:fm-<id>" -> "<id>"
-window_to_task() {
-  local w=$1 t
-  t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
-}
-
+# last_status_line, status_is_captain_relevant, window_to_task, and
+# scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
+# the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
+# and dedup state below layer the daemon's escalation-digest concerns on top.
+#
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
 # field for "self" is informational (logged); for "escalate" it is the pre-read
@@ -384,40 +395,18 @@ mark_escalated_seen() {  # <kind> <arg> <state>
   esac
 }
 
-# 0 if the pane is currently showing a busy signature (crewmate resumed/working).
-pane_is_busy() {  # <window>
-  local win=$1 tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$BUSY_REGEX_DEFAULT}"
-}
-
-# pane_input_pending: detect non-empty text on the cursor/input line. Returns 0
-# (pending) if the cursor line has non-whitespace content that is NOT a
-# recognized idle pattern (bare prompt, busy footer).
-# This catches:
-#   - A human's half-typed line (no Enter submitted yet) — the race window
-#     between the captain returning and their message landing.
-#   - A previous injection whose Enter was swallowed (text sits unsent).
-# In both cases injecting would corrupt the shared input channel (merge or
-# concatenate). The safe action is to defer and retry next cycle.
-# FM_COMPOSER_IDLE_RE overrides the idle pattern (extended regex).
-pane_input_pending() {  # <target>
-  local target=$1 cy pane_out line
-  # Get the cursor's Y position (0-indexed from the top of the visible pane).
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
-  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
-  # Capture the full visible pane and extract the cursor line (sed is 1-indexed).
-  pane_out=$(tmux capture-pane -p -t "$target" 2>/dev/null) || return 1
-  line=$(printf '%s\n' "$pane_out" | sed -n "$((cy + 1))p")
-  # Strip trailing whitespace (the cursor position is not "content").
-  line="${line%"${line##*[![:space:]]}"}"
-  # Blank line = empty composer = not pending.
-  [ -n "$line" ] || return 1
-  # A recognized idle pattern (bare prompt, busy footer) = empty composer.
-  printf '%s' "$line" | grep -qiE "${FM_COMPOSER_IDLE_RE:-$COMPOSER_IDLE_RE_DEFAULT}" && return 1
-  return 0
-}
+# Busy + composer-empty detection are the shared primitives in fm-tmux-lib.sh
+# (one source of truth with fm-send.sh). These thin wrappers keep the daemon's
+# call sites and the unit tests stable.
+#
+# pane_input_pending returns 0 (pending) when the cursor line holds real
+# unsubmitted text - a human's half-typed line (the return race) or a previous
+# injection whose Enter was swallowed. The detector drops dim/faint ghost text and
+# strips the harness's composer box borders, so a ghost-only or idle bordered
+# claude composer ("│ > … │") is correctly read as empty, not pending (incidents
+# afk-invx-i5 and composer-robust).
+pane_is_busy() { fm_pane_is_busy "$@"; }        # <window>
+pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
 
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
@@ -439,8 +428,31 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since"; return 0; fi
+  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
+}
+
+# Raise a loud, rate-limited alarm when escalations cannot be delivered after
+# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
+# is swallowed). The daemon must NEVER silently wedge: this logs
+# an ERROR, drops a durable marker firstmate/recovery can surface, and flashes
+# the supervisor client's status line. Nothing is lost — the buffer and the
+# wake-queue both survive — but the stall stops being invisible.
+inject_wedge_alarm() {  # <state> <age-seconds>
+  local state=$1 age=$2 marker target
+  marker="$state/.subsuper-inject-wedged"
+  # Re-alarm at most once per max-defer window so a long wedge does not spam.
+  if [ "$(_file_age "$marker")" -lt "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}" ]; then
+    return 0
+  fi
+  log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+  {
+    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    cat "$state/.subsuper-escalations" 2>/dev/null
+  } > "$marker" 2>/dev/null || true
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
@@ -455,15 +467,18 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
-# Three cheap jobs, each guarded so an empty/quiet fleet costs near zero:
+# Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
+#  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
+#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
+#     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last
+  local state=$1 now due f key task win marker age last max_defer oldest
   now=$(_now)
 
   # (1) batch flush
@@ -473,6 +488,26 @@ housekeeping() {  # <state>
     due=$(_oldest_line_age "$state/.subsuper-escalations")
     if [ "$due" -ge "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" ]; then
       escalate_flush "$state" || true
+    fi
+  fi
+
+  # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
+  # retry the normal delivery path. If that still cannot confirm, raise a loud
+  # wedge alarm while preserving the buffer.
+  max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
+  if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
+    oldest=$(_oldest_line_age "$state/.subsuper-escalations")
+    # Throttle the alarm to once per max-defer window (the wedge marker doubles
+    # as the throttle). A successful flush clears the buffer; a failed one alarms
+    # and waits.
+    if [ "$oldest" -ge "$max_defer" ] \
+       && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
+      if escalate_flush "$state"; then
+        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        rm -f "$state/.subsuper-inject-wedged"
+      else
+        inject_wedge_alarm "$state" "$oldest"
+      fi
     fi
   fi
 
@@ -498,20 +533,19 @@ housekeeping() {  # <state>
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux.
+  #     classifier may have missed). Cheap: status files only, no tmux. The
+  #     captain-relevant filtering is the shared classifier's
+  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    for f in "$state"/*.status; do
-      [ -e "$f" ] || continue
-      last=$(last_status_line "$f")
-      status_is_captain_relevant "$last" || continue
-      task=$(basename "$f"); task="${task%.status}"
-      local seen
+    local seen
+    while IFS="$(printf '\t')" read -r f task last; do
+      [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
-    done
+    done < <(scan_captain_relevant_statuses "$state")
   fi
 }
 
@@ -528,26 +562,28 @@ window_for_task() {  # <task-key>
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the turn-started
-# confirmation fails after bounded retries. On non-zero the caller preserves
+# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
+# be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
-# Submit model (the two HIGH fixes from the maintainer's review):
+# Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the composer is empty after Enter. pane_input_pending checks
-#     the cursor line: empty means the text was consumed (submit succeeded);
-#     non-empty means Enter was swallowed (retry Enter only, not retype).
-#   - COMPOSER GUARD before typing: if the cursor line already has content (a
-#     human's half-typed line, or a previous injection's unsent text), defer
-#     entirely — injecting would merge with the human's text.
+#   - SUBMIT ACK = the dim-ghost-aware and border-aware composer detector reports
+#     empty after Enter.
+#     Empty means the text was consumed; pending means Enter was swallowed; unknown
+#     is treated as undelivered by this strict daemon path.
+#   - COMPOSER GUARD before typing: if the cursor line already has real content
+#     after dim/faint ghost text and borders are ignored (a human's half-typed
+#     line, or a previous injection's unsent text), defer entirely - injecting
+#     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target i retries sleep_s
+  local msg=$1 state target retries sleep_s verdict
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the base one-shot
-  # watcher. Escalations buffer and survive for the next catch-up flush.
+  # daemon self-handles and stays quiet; firstmate drives the normal always-on
+  # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
@@ -559,9 +595,9 @@ inject_msg() {  # <message> [state]
   tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
   # (3) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
-  #   b) pane_input_pending: the cursor line has non-empty content (a human's
-  #      half-typed line, or a previous injection whose Enter was swallowed).
-  # Both defer; the buffered escalation survives for the next cycle.
+  #   b) pane_input_pending: the cursor line has real unsubmitted text after
+  #      dim/faint ghost text and borders are ignored (a human's half-typed line,
+  #      or a previous injection whose Enter was swallowed).
   if pane_is_busy "$target"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
@@ -570,28 +606,17 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor pane has pending input (non-empty composer)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter. Retry Enter only (never
-  # retype) so a swallowed Enter does not concatenate digests in an uncleared
-  # composer. Submit success = the composer is empty after Enter (the text was
-  # consumed); submit failure = the composer still has our text (Enter swallowed).
+  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
+  # retype) via the shared submit primitive. Success = the composer is confirmed
+  # EMPTY afterward (the text was consumed). An unconfirmed/unknown pane does NOT
+  # count as delivered, so the buffer is preserved (strict) rather than cleared.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  if ! tmux send-keys -t "$target" -l "$msg" 2>/dev/null; then
-    log "inject failed: send-keys -l returned non-zero"
-    return 1
+  verdict=$(fm_tmux_submit_core "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  if [ "$verdict" = empty ]; then
+    return 0  # Composer cleared → submit confirmed.
   fi
-  sleep "$sleep_s"
-  i=0
-  while [ "$i" -lt "$retries" ]; do
-    i=$((i + 1))
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
-    sleep "$sleep_s"
-    if ! pane_input_pending "$target"; then
-      return 0  # Composer cleared → submit succeeded.
-    fi
-    # Enter was swallowed (text still in composer). Retry Enter, not retype.
-  done
-  log "inject failed: Enter swallowed after $retries retries (text in composer)"
+  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
 }
 
@@ -675,7 +700,7 @@ trim_log() {
 
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
-# classifiers above are sourceable for unit tests (tests/fm-wake-queue.test.sh).
+# classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
 # ============================================================================
 
 fm_super_main() {
@@ -683,8 +708,8 @@ fm_super_main() {
   STATE="$(_state_root)"
   mkdir -p "$STATE"
 
-  # Source the portable lock helpers (mkdir-based, works on macOS where flock
-  # is absent). Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
+  # Source the portable lock helpers (works on macOS where flock is absent).
+  # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 
@@ -701,7 +726,7 @@ fm_super_main() {
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
-  # --- single instance (portable mkdir-based lock, no flock dependency) ------
+  # --- single instance (portable lock, no flock dependency) ------------------
   if ! fm_lock_try_acquire "$LOCK"; then
     if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
       echo "error: another fm-supervise-daemon is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
