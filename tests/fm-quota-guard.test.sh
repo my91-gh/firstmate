@@ -16,6 +16,17 @@ set -u
 GUARD="$ROOT/bin/fm-quota-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-quota-guard)
 
+# The decision clock is pinned through the script's FM_QUOTA_GUARD_NOW seam, so
+# "before the reset" and "after the reset" are properties of the fixture rather
+# than of the day the suite happens to run. Wall-clock-relative literals would
+# silently invert the moment real time passed them.
+FIXED_NOW=1787054400             # 2026-08-18T12:00:00Z
+NOW_EPOCH=                       # a case sets this to move the clock on purpose
+BEFORE_NOW=2026-08-18T06:00:00Z  # a reset the pinned clock has already passed
+AFTER_NOW=2026-08-19T00:00:00Z   # a reset still ahead of the pinned clock
+LATER_NOW=2026-08-19T06:00:00Z   # later still, for an early window roll
+LATEST_NOW=2026-08-19T12:00:00Z  # later again, for the roll that resumes
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 # --- fixtures ---------------------------------------------------------------
@@ -74,6 +85,7 @@ run_guard() {
   shift
   FM_STATE_OVERRIDE="$home/state" \
   FM_QUOTA_GUARD_QUOTA_CMD="cat $home/quota.json" \
+  FM_QUOTA_GUARD_NOW="${NOW_EPOCH:-$FIXED_NOW}" \
     "$GUARD" "$@"
 }
 
@@ -188,7 +200,7 @@ test_resume_requires_reset_and_refresh() {
   # Now the window genuinely refreshed.
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:3:2030-01-01T00:00:00Z" \
+      "five_hour:session:3:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -215,7 +227,7 @@ test_refresh_before_reset_does_not_resume() {
   home=$(make_home early-refresh)
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:99:2030-01-01T00:00:00Z" \
+      "five_hour:session:99:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -223,7 +235,7 @@ test_refresh_before_reset_does_not_resume() {
   # Usage drops but the SAME far-future window is still the one in force.
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:5:2030-01-01T00:00:00Z" \
+      "five_hour:session:5:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -244,7 +256,7 @@ test_rolled_window_resumes_on_new_reset_plus_refresh() {
   home=$(make_home rolled)
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:97:2030-01-01T00:00:00Z" \
+      "five_hour:session:97:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -252,13 +264,13 @@ test_rolled_window_resumes_on_new_reset_plus_refresh() {
   # A strictly later reset, but usage still at the wall: still no resume.
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:97:2031-01-01T00:00:00Z" \
+      "five_hour:session:97:$LATER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
   [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
     || fail "a rolled window with usage still at the wall must not resume"
-  assert_grep "resets_at=2031-01-01T00:00:00Z" "$(record "$home" claude.five_hour)" \
+  assert_grep "resets_at=$LATER_NOW" "$(record "$home" claude.five_hour)" \
     "a rolled window must update the recorded reset so the next check tests the real window"
   [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
     || fail "following a rolled reset must not re-alert; it is the same episode"
@@ -266,7 +278,7 @@ test_rolled_window_resumes_on_new_reset_plus_refresh() {
   # Now the roll is accompanied by a real drop.
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:2:2032-01-01T00:00:00Z" \
+      "five_hour:session:2:$LATEST_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -289,7 +301,7 @@ test_alert_and_resume_wakes_are_distinguishable() {
   run_guard "$home" poll >/dev/null 2>&1
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:1:2030-01-01T00:00:00Z" \
+      "five_hour:session:1:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -305,6 +317,150 @@ test_alert_and_resume_wakes_are_distinguishable() {
   assert_not_contains "$resume_line" "quota-guard alert" "the resume payload must not read as an alert"
 
   pass "alert and resume wakes carry distinct keys and distinct payloads"
+}
+
+# The reset side of every decision reads the clock through FM_QUOTA_GUARD_NOW.
+# Pinning that seam is what makes "before the reset" and "after the reset"
+# properties of the fixture, so the seam itself is asserted here: the same
+# fixture and the same durable record must decide differently on either side of
+# the window's reset, with nothing but the injected instant changed.
+test_reset_decisions_read_the_injected_clock() {
+  local home
+  home=$(make_home clock-seam)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$AFTER_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "setup: the episode must open"
+
+  # The window reads as refreshed, but the injected now is before its reset.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$AFTER_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
+    || fail "before the injected now reaches the reset, the episode must stay open"
+
+  # Nothing changes but the clock, which now sits past the reset.
+  NOW_EPOCH=$((FIXED_NOW + 172800))
+  run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "moving the injected clock past the reset must resume the episode"
+
+  pass "reset decisions follow the injected clock, so no assertion rides the wall clock"
+}
+
+# An alert wake that cannot be enqueued must not be lost: Firstmate would keep
+# dispatching into an exhausted window and then receive a resume for a pause it
+# never performed. The episode keeps owing the alert until delivery is recorded,
+# and that recorded delivery is what makes it exactly one alert.
+test_alert_wake_is_retried_until_it_is_delivered() {
+  local home seq
+  home=$(make_home alert-retry)
+  # The episode opens on a window whose reset has already passed, so the only
+  # thing standing between the later refresh and a resume is the owed alert.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+
+  # Make the durable queue refuse an append for one cycle, the way a full disk or
+  # an unwritable state directory would.
+  seq="$home/state/.wake-queue.seq"
+  mkdir -p "$seq" || fail "setup: could not block the wake queue"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 0 ] \
+    || fail "setup: no alert can be enqueued while the queue refuses appends"
+  assert_present "$(record "$home" claude.five_hour)" \
+    "an alert that could not be enqueued must leave the episode open"
+  assert_grep "could not be enqueued" "$(guard_log "$home")" \
+    "a failed alert enqueue must be logged loudly"
+
+  # The queue recovers, and the window refreshes in the same cycle. The owed
+  # alert is delivered first and the episode stays open: a resume for a pause
+  # Firstmate was never told to perform is worse than a late alert.
+  rmdir "$seq" || fail "setup: could not restore the wake queue"
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "an alert that failed to enqueue must be retried and delivered exactly once"
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
+    || fail "an episode that still owed its alert must not resume"
+
+  # Delivery is recorded durably, so no later cycle re-alerts.
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "an episode whose alert was delivered must never re-alert"
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "once its alert is delivered the refreshed window must resume exactly once"
+
+  pass "a failed alert enqueue is retried until delivered, and delivered exactly once"
+}
+
+# quota-axi can report a window with no resetsAt at all. An episode opened there
+# has no time condition it can ever satisfy, so without adopting the first usable
+# reset it stays open forever and every task in its ledger stays paused.
+test_episode_opened_without_a_usable_reset_still_resumes() {
+  local home
+
+  # <home> <unusable-resetsAt>
+  check_unusable_reset() {
+    local home=$1 bad=$2
+    write_quota "$home" \
+      "$(provider_json claude false \
+        "five_hour:session:99:$bad" \
+        "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+      "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+    run_guard "$home" poll >/dev/null 2>&1
+    [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+      || fail "setup: a window with an unusable resetsAt ('$bad') must still open an episode"
+
+    # A usable reset arrives and has already passed, but usage is still at the
+    # wall. Adoption moves the time condition only; it must not resume alone.
+    write_quota "$home" \
+      "$(provider_json claude false \
+        "five_hour:session:99:$BEFORE_NOW" \
+        "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+      "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+    run_guard "$home" poll >/dev/null 2>&1
+    [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
+      || fail "adopting a passed reset must not resume while usage is still at the wall"
+    assert_grep "resets_at=$BEFORE_NOW" "$(record "$home" claude.five_hour)" \
+      "the episode must adopt the first usable reset time the provider reports"
+
+    # Now the window has genuinely refreshed.
+    write_quota "$home" \
+      "$(provider_json claude false \
+        "five_hour:session:2:$BEFORE_NOW" \
+        "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+      "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+    run_guard "$home" poll >/dev/null 2>&1
+    [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+      || fail "an episode opened without a usable reset must resume on a passed reset plus a refresh"
+    assert_absent "$(record "$home" claude.five_hour)" \
+      "resuming must clear the window's paused record"
+    [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+      || fail "adopting a reset time must not re-alert; it is the same episode"
+  }
+
+  home=$(make_home no-reset-missing)
+  check_unusable_reset "$home" ""
+  home=$(make_home no-reset-unparseable)
+  check_unusable_reset "$home" "not-a-time"
+
+  pass "an episode opened without a usable resetsAt adopts one and still resumes on proof of refresh"
 }
 
 # --- resilience: bad data never decides anything -----------------------------
@@ -351,13 +507,13 @@ EOF
 
   # 5. The quota command itself fails.
   FM_STATE_OVERRIDE="$home/state" FM_QUOTA_GUARD_QUOTA_CMD="false" \
-    "$GUARD" poll >/dev/null 2>&1 \
+    FM_QUOTA_GUARD_NOW="$FIXED_NOW" "$GUARD" poll >/dev/null 2>&1 \
     || fail "a failing quota command must not fail the poll"
   assert_grep "quota read failed" "$log" "a failing quota read must be logged loudly"
 
   # 6. The quota command emits unparseable output.
   FM_STATE_OVERRIDE="$home/state" FM_QUOTA_GUARD_QUOTA_CMD="printf 'not json'" \
-    "$GUARD" poll >/dev/null 2>&1 \
+    FM_QUOTA_GUARD_NOW="$FIXED_NOW" "$GUARD" poll >/dev/null 2>&1 \
     || fail "unparseable quota output must not fail the poll"
 
   # Through all six, nothing was decided and no record was written.
@@ -394,7 +550,7 @@ test_stale_reading_cannot_resume_an_open_episode() {
   # Stale data that would otherwise look like a clean refresh.
   write_quota "$home" \
     "$(provider_json claude true \
-      "five_hour:session:0:2030-01-01T00:00:00Z" \
+      "five_hour:session:0:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -428,7 +584,7 @@ test_open_episode_survives_a_guard_restart() {
 
   write_quota "$home" \
     "$(provider_json claude false \
-      "five_hour:session:1:2030-01-01T00:00:00Z" \
+      "five_hour:session:1:$AFTER_NOW" \
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
@@ -480,6 +636,7 @@ test_log_stays_under_its_retention_cap() {
     FM_STATE_OVERRIDE="$home/state" \
     FM_QUOTA_GUARD_QUOTA_CMD="cat $home/quota.json" \
     FM_QUOTA_GUARD_LOG_MAX_BYTES=100000000 FM_QUOTA_GUARD_LOG_KEEP=2 \
+    FM_QUOTA_GUARD_NOW="$FIXED_NOW" \
       "$GUARD" poll >/dev/null 2>&1
   done
   unrotated=$(wc -c < "$(guard_log "$home")" | tr -d '[:space:]')
@@ -497,6 +654,7 @@ test_log_stays_under_its_retention_cap() {
     FM_STATE_OVERRIDE="$home/state" \
     FM_QUOTA_GUARD_QUOTA_CMD="cat $home/quota.json" \
     FM_QUOTA_GUARD_LOG_MAX_BYTES=$cap FM_QUOTA_GUARD_LOG_KEEP=$keep \
+    FM_QUOTA_GUARD_NOW="$FIXED_NOW" \
       "$GUARD" poll >/dev/null 2>&1
   done
 
@@ -675,7 +833,8 @@ test_status_reports_windows_and_records_without_mutating() {
   [ "$before" = "$after" ] || fail "status must not mutate the wake queue"
 
   # A degraded quota read must not break status.
-  out=$(FM_STATE_OVERRIDE="$home/state" FM_QUOTA_GUARD_QUOTA_CMD="false" "$GUARD" status 2>&1) \
+  out=$(FM_STATE_OVERRIDE="$home/state" FM_QUOTA_GUARD_QUOTA_CMD="false" \
+    FM_QUOTA_GUARD_NOW="$FIXED_NOW" "$GUARD" status 2>&1) \
     || fail "status must survive an unavailable quota read"
   assert_contains "$out" "unavailable" "status must say so when the quota read fails"
   assert_contains "$out" "waiting for reset" "status must still report durable records"
@@ -710,6 +869,9 @@ test_resume_requires_reset_and_refresh
 test_refresh_before_reset_does_not_resume
 test_rolled_window_resumes_on_new_reset_plus_refresh
 test_alert_and_resume_wakes_are_distinguishable
+test_reset_decisions_read_the_injected_clock
+test_alert_wake_is_retried_until_it_is_delivered
+test_episode_opened_without_a_usable_reset_still_resumes
 test_stale_and_missing_data_never_decide
 test_stale_reading_cannot_resume_an_open_episode
 test_open_episode_survives_a_guard_restart

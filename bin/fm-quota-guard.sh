@@ -55,11 +55,18 @@
 #
 # ALERT is EDGE-TRIGGERED, and the durable paused record IS the edge. When a
 # tracked window first reaches the threshold, the guard writes that window's
-# paused record and enqueues exactly one alert wake. While the record exists no
-# further alert is enqueued, so an exhausted window that stays exhausted for
-# hours produces one wake, not one every two minutes. The record is on disk and
-# written atomically, so the episode survives a guard restart and a pending
-# resume is never lost.
+# paused record and enqueues exactly one alert wake. What suppresses every later
+# alert is the RECORDED DELIVERY of that wake - alert_delivered=1 in the record -
+# and not the mere existence of the record, so an exhausted window that stays
+# exhausted for hours produces one wake, not one every two minutes.
+#
+# An alert wake that cannot be enqueued is never dropped. The episode stays open
+# with its delivery unrecorded, the failure is logged loudly, and the enqueue is
+# RETRIED on every later cycle until it succeeds. An episode whose alert is
+# still owed cannot close, because a resume wake for a pause Firstmate was never
+# told to perform is worse than a late alert. Both the record and the delivery
+# it carries are written atomically, so an episode and its owed alert survive a
+# guard restart and neither the alert nor the resume is lost.
 #
 # RESUME requires PROOF OF REFRESH, not just elapsed time. A resetsAt that has
 # passed is necessary but not sufficient: the provider may not have rolled the
@@ -72,6 +79,13 @@
 # cannot resume prematurely. When the recorded reset passes with usage still at
 # the threshold, the guard records the provider's new resetsAt in place and stays
 # paused WITHOUT re-alerting: the episode is still the same episode.
+#
+# An episode opened while resetsAt was missing or unparseable is still
+# resumable. The first later reading that carries a usable resetsAt is adopted
+# into the record, so the ordinary reset-passed path can run instead of the
+# episode staying open forever with every task in its ledger paused. Adoption
+# moves only the time condition; the usage drop is still required, so it is
+# never a way to resume on elapsed time alone.
 #
 # STALE AND MISSING DATA NEVER DECIDE ANYTHING. A failed quota-axi call, a
 # provider absent from the output, a provider whose state.stale is true, a
@@ -128,6 +142,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -314,6 +330,55 @@ record_get() {  # <record-path> <field>
   LC_ALL=C awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1" 2>/dev/null
 }
 
+# One owner for every mutation of an open episode's record. Each <field>=<value>
+# argument ends up present exactly once and every other line is kept, so a record
+# is updated in place rather than rewritten from a partial idea of its fields.
+# The new content is built in full before anything is written: a failed awk must
+# leave the durable record alone rather than truncate the episode away.
+record_set() {  # <record-path> <field>=<value>...
+  local rec=$1 spec out
+  shift
+  spec=$(printf '%s\n' "$@")
+  # The spec travels in the environment rather than through -v: -v applies
+  # escape processing, and the one true awk refuses a newline in such a value
+  # outright, so a multi-field update would fail on macOS alone.
+  out=$(FM_QUOTA_GUARD_RECORD_SPEC="$spec" LC_ALL=C awk '
+    BEGIN {
+      n = split(ENVIRON["FM_QUOTA_GUARD_RECORD_SPEC"], lines, "\n")
+      for (i = 1; i <= n; i++) {
+        eq = index(lines[i], "=")
+        if (eq > 0) { k = substr(lines[i], 1, eq - 1); want[k] = lines[i]; order[i] = k }
+      }
+    }
+    {
+      eq = index($0, "=")
+      k = (eq > 0) ? substr($0, 1, eq - 1) : ""
+      if (k != "" && (k in want)) { print want[k]; done[k] = 1; next }
+      print
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        k = order[i]
+        if (k != "" && !(k in done)) { print want[k]; done[k] = 1 }
+      }
+    }
+  ' "$rec") || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | write_atomic "$rec"
+}
+
+# An epoch is usable only when it is a whole number that arithmetic comparison
+# can actually take. A record written before its window had a resetsAt carries an
+# empty one, and `[ "$now" -ge "" ]` is a shell error rather than a decision.
+epoch_usable() {  # <value>
+  case "${1:-}" in
+    ''|-) return 1 ;;
+    -*) case "${1#-}" in ''|*[!0-9]*) return 1 ;; esac ;;
+    *[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
 # --- quota reading -----------------------------------------------------------
 
 # One TSV line per tracked window: <key> <status> <percentUsed> <resetsAt>.
@@ -348,6 +413,9 @@ read_quota_windows() {  # -> TSV on stdout; nonzero when the read itself failed
 
 # --- the poll cycle ----------------------------------------------------------
 
+# Open the episode durably. The record is written with its alert still owed, so
+# the delivery below - and every retry of it - has something to record against
+# even if this process dies between the two.
 open_episode() {  # <key> <pct> <resets_at>
   local key=$1 pct=$2 resets_at=$3 rec resets_epoch
   rec=$(record_path "$key")
@@ -359,6 +427,7 @@ threshold=$THRESHOLD
 percent_used=$pct
 resets_at=$resets_at
 resets_epoch=$resets_epoch
+alert_delivered=0
 alerted_at=$(now_iso)
 alerted_epoch=$(now_epoch)
 EOF
@@ -366,13 +435,23 @@ EOF
     log ERROR "could not write paused record for $key; no alert enqueued"
     return 1
   fi
-  if fm_wake_append check "quota-guard:alert:$key" \
+  return 0
+}
+
+# The episode's one alert, and the durable note that it was delivered. The note
+# is what suppresses every later alert, so an enqueue that fails leaves the
+# episode owing its alert and the next cycle tries again.
+deliver_alert() {  # <key> <pct> <resets_at> <record-path>
+  local key=$1 pct=$2 resets_at=$3 rec=$4
+  if ! fm_wake_append check "quota-guard:alert:$key" \
     "check: quota-guard alert: $key at ${pct}% used (threshold ${THRESHOLD}%), resets at ${resets_at:-unknown}; pause work per the quota-guard-cycle skill"
   then
-    log ALERT "$key crossed ${THRESHOLD}% at ${pct}%; resets_at=${resets_at:-unknown}; alert wake enqueued"
-  else
-    log ERROR "$key crossed ${THRESHOLD}% at ${pct}% but the alert wake could not be enqueued; record kept so the resume still fires"
+    log ERROR "$key is at ${pct}% (threshold ${THRESHOLD}%) but the alert wake could not be enqueued; the episode stays open and the alert is retried next cycle"
+    return 1
   fi
+  record_set "$rec" "alert_delivered=1" \
+    || log ERROR "$key alert wake enqueued but the delivery could not be recorded; a later cycle repeats the alert rather than losing it"
+  log ALERT "$key at ${pct}% used (threshold ${THRESHOLD}%); resets_at=${resets_at:-unknown}; alert wake enqueued"
   return 0
 }
 
@@ -410,7 +489,9 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
 
   if [ ! -f "$rec" ]; then
     if pct_at_least "$pct" "$THRESHOLD"; then
-      open_episode "$key" "$pct" "$resets_at" && { printf 'alerted\n'; return 0; }
+      open_episode "$key" "$pct" "$resets_at" || { printf 'error\n'; return 0; }
+      deliver_alert "$key" "$pct" "$resets_at" "$rec" \
+        && { printf 'alerted\n'; return 0; }
       printf 'error\n'
       return 0
     fi
@@ -418,24 +499,44 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
     return 0
   fi
 
-  # An episode is open. Never re-alert; decide only whether it can close.
+  # An episode is open. Its alert is owed until the record says it was delivered,
+  # and an episode that still owes its alert cannot close: Firstmate was never
+  # told to pause, so a resume for it would answer a pause that never happened.
+  if [ "$(record_get "$rec" alert_delivered)" != 1 ]; then
+    deliver_alert "$key" "$pct" "$resets_at" "$rec" \
+      && { printf 'alerted\n'; return 0; }
+    printf 'error\n'
+    return 0
+  fi
+
+  # The alert is delivered. Never re-alert; decide only whether it can close.
   recorded_epoch=$(record_get "$rec" resets_epoch)
   recorded_at=$(record_get "$rec" resets_at)
-  now=$(now_epoch)
-  case "$recorded_epoch" in
-    ''|*[!0-9-]*) ;;
-    *) [ "$now" -ge "$recorded_epoch" ] && time_ok=1 ;;
-  esac
   observed_epoch=$(iso_to_epoch "$resets_at" 2>/dev/null) || observed_epoch=
-  case "$observed_epoch" in
-    ''|*[!0-9-]*) ;;
-    *)
-      case "$recorded_epoch" in
-        ''|*[!0-9-]*) ;;
-        *) [ "$observed_epoch" -gt "$recorded_epoch" ] && time_ok=1 ;;
-      esac
-      ;;
-  esac
+  now=$(now_epoch)
+
+  # An episode opened while the window had no usable resetsAt can never satisfy
+  # the time condition on its own, so it would stay open forever with every task
+  # in its ledger paused. Adopt the first usable one the provider reports, which
+  # restores the ordinary reset-passed path without weakening it: the usage drop
+  # below is still required.
+  if ! epoch_usable "$recorded_epoch" && epoch_usable "$observed_epoch"; then
+    if record_set "$rec" "resets_at=$resets_at" "resets_epoch=$observed_epoch"; then
+      recorded_epoch=$observed_epoch
+      recorded_at=$resets_at
+      log WAIT "$key had no usable recorded reset time; adopted the observed resets_at=$resets_at so the episode can resume once it passes"
+    else
+      log ERROR "$key could not adopt the observed reset time; the episode stays open"
+    fi
+  fi
+
+  if epoch_usable "$recorded_epoch" && [ "$now" -ge "$recorded_epoch" ]; then
+    time_ok=1
+  fi
+  if epoch_usable "$recorded_epoch" && epoch_usable "$observed_epoch" \
+    && [ "$observed_epoch" -gt "$recorded_epoch" ]; then
+    time_ok=1
+  fi
 
   if [ "$time_ok" -eq 1 ] && ! pct_at_least "$pct" "$THRESHOLD"; then
     close_episode "$key" "$pct"
@@ -447,13 +548,8 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
     # The reset came and went with usage still at the wall. Keep the episode and
     # follow the provider's new resetsAt so the next check tests the real window.
     if [ -n "$resets_at" ] && [ "$resets_at" != "$recorded_at" ]; then
-      {
-        LC_ALL=C awk -F= -v ra="$resets_at" -v re="${observed_epoch:-}" '
-          $1 == "resets_at"    { print "resets_at=" ra; next }
-          $1 == "resets_epoch" { print "resets_epoch=" re; next }
-          { print }
-        ' "$rec"
-      } | write_atomic "$rec" || log ERROR "$key could not refresh its recorded reset time"
+      record_set "$rec" "resets_at=$resets_at" "resets_epoch=${observed_epoch:-}" \
+        || log ERROR "$key could not refresh its recorded reset time"
       log WAIT "$key reset time passed but usage is still ${pct}%; still paused, now tracking resets_at=$resets_at"
     else
       log WAIT "$key reset time passed but usage is still ${pct}%; still paused, not resuming"
@@ -469,7 +565,7 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
 
 poll_once() {
   local tsv key status pct resets_at verdict
-  local n_alerted=0 n_resumed=0 n_paused=0 n_skipped=0 n_clear=0 summary
+  local n_alerted=0 n_resumed=0 n_paused=0 n_skipped=0 n_clear=0 n_error=0 summary
 
   # One display timestamp for the whole cycle: every log line and record written
   # by this poll shares it, which also keeps the cycle to a single `date` fork.
@@ -500,12 +596,13 @@ poll_once() {
       paused|waiting) n_paused=$((n_paused + 1)) ;;
       skipped) n_skipped=$((n_skipped + 1)) ;;
       clear) n_clear=$((n_clear + 1)) ;;
+      error) n_error=$((n_error + 1)) ;;
     esac
   done <<EOF
 $tsv
 EOF
 
-  summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped"
+  summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped errors=$n_error"
   printf '%s\t%s\t%s\n' "$(now_epoch)" "$(now_iso)" "$summary" > "$LAST_POLL" 2>/dev/null || true
   log POLL "$summary"
   POLL_ISO=
@@ -605,7 +702,7 @@ cmd_arm() {
   # Confirm it actually took the lock rather than reporting a fork as success.
   local waited=0
   while [ "$waited" -lt 30 ]; do
-    pid=$(guard_live_pid 2>/dev/null) && { printf 'quota guard: armed pid=%s\n' "$pid"; return 0; }
+    pid=$(guard_live_pid 2>/dev/null) && { printf 'quota guard: armed pid=%s\n' "$pid" >&2; return 0; }
     waited=$((waited + 1))
     sleep 0.1
   done
@@ -691,10 +788,11 @@ EOF
   return 0
 }
 
+# The ledger keys a file by task id, so it is held to exactly the shape
+# bin/fm-pr-lib.sh owns, plus the same 64-character bound the rest of the home
+# applies. Reused rather than restated so a later tightening reaches here too.
 task_id_valid() {
-  case "$1" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-  esac
+  fm_task_id_path_safe "$1" || return 1
   [ "${#1}" -le 64 ]
 }
 
