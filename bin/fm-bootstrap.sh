@@ -67,6 +67,11 @@
 #          guesses at malformed or unsafe existing files, and secondmate homes
 #          await the primary-authoritative inherited value instead of creating
 #          their own.
+#          The same locked mutable local path also arms this home's background
+#          quota guard, which bin/fm-quota-guard.sh owns in full. The arm is
+#          silent, idempotent, and a no-op when a guard already runs or when
+#          quota-axi or jq is absent, and no guard failure blocks a session
+#          start.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
