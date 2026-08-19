@@ -22,6 +22,7 @@ TMP_ROOT=$(fm_test_tmproot fm-quota-guard)
 # silently invert the moment real time passed them.
 FIXED_NOW=1787054400             # 2026-08-18T12:00:00Z
 NOW_EPOCH=                       # a case sets this to move the clock on purpose
+PAST_NOW=2026-08-18T03:00:00Z    # a reset passed even earlier
 BEFORE_NOW=2026-08-18T06:00:00Z  # a reset the pinned clock has already passed
 AFTER_NOW=2026-08-19T00:00:00Z   # a reset still ahead of the pinned clock
 LATER_NOW=2026-08-19T06:00:00Z   # later still, for an early window roll
@@ -356,12 +357,15 @@ test_reset_decisions_read_the_injected_clock() {
   pass "reset decisions follow the injected clock, so no assertion rides the wall clock"
 }
 
-# An alert wake that cannot be enqueued must not be lost: Firstmate would keep
-# dispatching into an exhausted window and then receive a resume for a pause it
-# never performed. The episode keeps owing the alert until delivery is recorded,
-# and that recorded delivery is what makes it exactly one alert.
-test_alert_wake_is_retried_until_it_is_delivered() {
-  local home seq
+# An alert wake that cannot be enqueued must not be lost while the window is
+# still exhausted: Firstmate would keep dispatching into it and then receive a
+# resume for a pause it never performed. The episode keeps owing the alert until
+# delivery is recorded, and that recorded delivery is what makes it one alert.
+# The retried wake must describe the reading that OPENED the episode, because a
+# wake that says "at 97% used" while quoting a later, healthier reading would
+# pause the whole fleet on a payload that contradicts itself.
+test_alert_wake_is_retried_while_the_window_is_still_exhausted() {
+  local home seq payload
   home=$(make_home alert-retry)
   # The episode opens on a window whose reset has already passed, so the only
   # thing standing between the later refresh and a resume is the owed alert.
@@ -383,9 +387,69 @@ test_alert_wake_is_retried_until_it_is_delivered() {
   assert_grep "could not be enqueued" "$(guard_log "$home")" \
     "a failed alert enqueue must be logged loudly"
 
-  # The queue recovers, and the window refreshes in the same cycle. The owed
-  # alert is delivered first and the episode stays open: a resume for a pause
-  # Firstmate was never told to perform is worse than a late alert.
+  # The queue recovers while the window is still exhausted, and the reading has
+  # moved on. The retry must still quote the stored 99% and the stored reset.
+  rmdir "$seq" || fail "setup: could not restore the wake queue"
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:97:$PAST_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "an alert that failed to enqueue must be retried and delivered exactly once"
+
+  payload=$(awk -F '\t' '$4 == "quota-guard:alert:claude/five_hour" { print $5 }' "$(queue "$home")")
+  assert_contains "$payload" "99% used" \
+    "a retried alert must quote the percentUsed stored when the episode opened"
+  assert_contains "$payload" "$BEFORE_NOW" \
+    "a retried alert must quote the resetsAt stored when the episode opened"
+  assert_not_contains "$payload" "97% used" \
+    "a retried alert must not describe a later reading than the one it was raised for"
+  assert_not_contains "$payload" "$PAST_NOW" \
+    "a retried alert must not describe a later reset than the one it was raised for"
+
+  # Delivery is recorded durably, so no later cycle re-alerts.
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "an episode whose alert was delivered must never re-alert"
+
+  # And an episode that really was alerted still owes its resume on refresh.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$PAST_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "an episode whose alert was delivered must resume exactly once on refresh"
+  assert_absent "$(record "$home" claude.five_hour)" \
+    "resuming must clear the paused record"
+
+  pass "an owed alert is retried on the reading that opened the episode, and delivered once"
+}
+
+# The other half: an alert that was never delivered and whose window recovered on
+# its own is abandoned, not sent late. Pausing the whole fleet for a window that
+# is healthy again is worse than never alerting for it, and since Firstmate was
+# never told to pause there is nothing to resume either.
+test_undelivered_alert_is_suppressed_once_the_window_recovers() {
+  local home seq
+  home=$(make_home alert-suppressed)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+
+  seq="$home/state/.wake-queue.seq"
+  mkdir -p "$seq" || fail "setup: could not block the wake queue"
+  run_guard "$home" poll >/dev/null 2>&1
+  assert_present "$(record "$home" claude.five_hour)" "setup: the episode must open"
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 0 ] \
+    || fail "setup: no alert can be enqueued while the queue refuses appends"
+
+  # The queue recovers, but so has the window.
   rmdir "$seq" || fail "setup: could not restore the wake queue"
   write_quota "$home" \
     "$(provider_json claude false \
@@ -393,20 +457,79 @@ test_alert_wake_is_retried_until_it_is_delivered() {
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
-  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
-    || fail "an alert that failed to enqueue must be retried and delivered exactly once"
+
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 0 ] \
+    || fail "an alert never delivered must not be sent once the window is healthy again"
   [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
-    || fail "an episode that still owed its alert must not resume"
+    || fail "a pause Firstmate never performed must not produce a resume wake"
+  assert_absent "$(record "$home" claude.five_hour)" \
+    "a suppressed episode must be closed, not left open forever"
+  assert_grep "recovered to 2% before its alert could be delivered" "$(guard_log "$home")" \
+    "a suppressed alert must be logged loudly enough to diagnose"
 
-  # Delivery is recorded durably, so no later cycle re-alerts.
-  run_guard "$home" poll >/dev/null 2>&1
+  # And the window is free to open a fresh episode when it is exhausted again.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$AFTER_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
   run_guard "$home" poll >/dev/null 2>&1
   [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
-    || fail "an episode whose alert was delivered must never re-alert"
-  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
-    || fail "once its alert is delivered the refreshed window must resume exactly once"
+    || fail "a suppressed episode must not stop the window alerting when it exhausts again"
 
-  pass "a failed alert enqueue is retried until delivered, and delivered exactly once"
+  pass "an undelivered alert is suppressed when the window recovers first, with no resume"
+}
+
+# The delivery note is the only thing standing between one alert and one alert
+# every two minutes, so it must survive the paused directory turning unwritable -
+# a permissions change or a read-only remount - while the wake queue still works.
+# Resume must not be gated on it either, or such a fault would strand the whole
+# fleet paused forever.
+test_delivery_note_survives_an_unwritable_paused_directory() {
+  local home seq paused n
+  [ "$(id -u)" -ne 0 ] || { pass "skipped as root: file modes do not restrict writes"; return 0; }
+
+  home=$(make_home unwritable-paused)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+
+  # Open the episode with the alert still owed, so the delivery note has to be
+  # written on a later cycle - the cycle that runs against the unwritable dir.
+  seq="$home/state/.wake-queue.seq"
+  mkdir -p "$seq" || fail "setup: could not block the wake queue"
+  run_guard "$home" poll >/dev/null 2>&1
+  assert_present "$(record "$home" claude.five_hour)" "setup: the episode must open"
+  rmdir "$seq" || fail "setup: could not restore the wake queue"
+
+  paused="$home/state/.quota-guard/paused"
+  chmod a-w "$paused" || fail "setup: could not make the paused directory unwritable"
+
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" poll >/dev/null 2>&1
+  n=$(count_wakes "$home" "quota-guard:alert:claude/five_hour")
+  [ "$n" -eq 1 ] || {
+    chmod u+w "$paused"
+    fail "an enqueued alert whose note could not be rewritten must not re-alert every cycle (got $n)"
+  }
+
+  # The window refreshes while the directory is still unwritable. The episode was
+  # genuinely alerted, so it still owes its resume.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  n=$(count_wakes "$home" "quota-guard:resume:claude/five_hour")
+  chmod u+w "$paused" || fail "could not restore the paused directory"
+  [ "$n" -eq 1 ] \
+    || fail "a write fault must never stop a genuinely alerted episode resuming (got $n)"
+
+  pass "an unwritable paused directory neither repeats the alert nor blocks the resume"
 }
 
 # quota-axi can report a window with no resetsAt at all. An episode opened there
@@ -870,7 +993,9 @@ test_refresh_before_reset_does_not_resume
 test_rolled_window_resumes_on_new_reset_plus_refresh
 test_alert_and_resume_wakes_are_distinguishable
 test_reset_decisions_read_the_injected_clock
-test_alert_wake_is_retried_until_it_is_delivered
+test_alert_wake_is_retried_while_the_window_is_still_exhausted
+test_undelivered_alert_is_suppressed_once_the_window_recovers
+test_delivery_note_survives_an_unwritable_paused_directory
 test_episode_opened_without_a_usable_reset_still_resumes
 test_stale_and_missing_data_never_decide
 test_stale_reading_cannot_resume_an_open_episode

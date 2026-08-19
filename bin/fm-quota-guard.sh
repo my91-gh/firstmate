@@ -61,12 +61,28 @@
 # exhausted for hours produces one wake, not one every two minutes.
 #
 # An alert wake that cannot be enqueued is never dropped. The episode stays open
-# with its delivery unrecorded, the failure is logged loudly, and the enqueue is
-# RETRIED on every later cycle until it succeeds. An episode whose alert is
-# still owed cannot close, because a resume wake for a pause Firstmate was never
-# told to perform is worse than a late alert. Both the record and the delivery
-# it carries are written atomically, so an episode and its owed alert survive a
-# guard restart and neither the alert nor the resume is lost.
+# with no delivery recorded, the failure is logged loudly, and the enqueue is
+# RETRIED on every later cycle for as long as the window is still at or above
+# the threshold. A retried alert quotes the percent_used and resets_at STORED in
+# the record, never the current reading, so the wake always describes the
+# exhaustion it was raised for and can never contradict itself.
+#
+# An episode whose alert was never delivered and whose window has since dropped
+# back below the threshold is CLOSED SILENTLY: the record is removed and neither
+# an alert nor a resume wake is enqueued. Firstmate was never told to pause, so
+# there is nothing to resume, and pausing the fleet for a window that is healthy
+# again is worse than never alerting for one that recovered on its own. The
+# suppression is logged.
+#
+# The delivery note is APPENDED to the record rather than rewritten through it,
+# because an append needs write permission on the record file alone. A paused
+# directory that turns unwritable - a permissions change, a read-only remount -
+# fails every rewrite, and an alert that is enqueued but cannot be noted would
+# then be enqueued again on every single cycle, which is the opposite of the
+# once-per-episode rule above. Resume is not gated on that note either: an
+# episode whose alert WAS delivered closes and enqueues its resume wake on proof
+# of refresh, so no write fault can strand the fleet paused. Both writes are
+# durable, so an episode and its owed alert survive a guard restart.
 #
 # RESUME requires PROOF OF REFRESH, not just elapsed time. A resetsAt that has
 # passed is necessary but not sufficient: the provider may not have rolled the
@@ -413,9 +429,9 @@ read_quota_windows() {  # -> TSV on stdout; nonzero when the read itself failed
 
 # --- the poll cycle ----------------------------------------------------------
 
-# Open the episode durably. The record is written with its alert still owed, so
-# the delivery below - and every retry of it - has something to record against
-# even if this process dies between the two.
+# Open the episode durably. The record carries no delivery note yet, so its
+# absence is what marks the alert as still owed - and what every retry, on this
+# cycle or a later one, has something to record against.
 open_episode() {  # <key> <pct> <resets_at>
   local key=$1 pct=$2 resets_at=$3 rec resets_epoch
   rec=$(record_path "$key")
@@ -427,7 +443,6 @@ threshold=$THRESHOLD
 percent_used=$pct
 resets_at=$resets_at
 resets_epoch=$resets_epoch
-alert_delivered=0
 alerted_at=$(now_iso)
 alerted_epoch=$(now_epoch)
 EOF
@@ -438,9 +453,32 @@ EOF
   return 0
 }
 
-# The episode's one alert, and the durable note that it was delivered. The note
-# is what suppresses every later alert, so an enqueue that fails leaves the
-# episode owing its alert and the next cycle tries again.
+# The durable note that this episode's alert was delivered. Appended rather than
+# rewritten because an append needs write permission on the record file alone: a
+# paused directory that has turned unwritable must not be able to turn one
+# enqueued alert into an alert on every later cycle. record_set covers the
+# opposite fault, a record file that cannot be written in a directory that can.
+mark_alert_delivered() {  # <record-path>
+  printf 'alert_delivered=1\n' >> "$1" 2>/dev/null && return 0
+  record_set "$1" "alert_delivered=1"
+}
+
+alert_delivered() {  # <record-path>
+  [ "$(record_get "$1" alert_delivered)" = 1 ]
+}
+
+# Remove a closed episode's record. A record that outlives its removal is decided
+# again on the next cycle, so a failure here is logged rather than swallowed.
+clear_record() {  # <key> <record-path>
+  rm -f "$2" 2>/dev/null || true
+  [ -f "$2" ] || return 0
+  log ERROR "$1 could not remove its paused record; the next cycle decides it again"
+  return 1
+}
+
+# The episode's one alert, and the note that it was delivered. The note is what
+# suppresses every later alert, so an enqueue that fails leaves the episode
+# owing its alert and a later cycle tries again.
 deliver_alert() {  # <key> <pct> <resets_at> <record-path>
   local key=$1 pct=$2 resets_at=$3 rec=$4
   if ! fm_wake_append check "quota-guard:alert:$key" \
@@ -449,8 +487,8 @@ deliver_alert() {  # <key> <pct> <resets_at> <record-path>
     log ERROR "$key is at ${pct}% (threshold ${THRESHOLD}%) but the alert wake could not be enqueued; the episode stays open and the alert is retried next cycle"
     return 1
   fi
-  record_set "$rec" "alert_delivered=1" \
-    || log ERROR "$key alert wake enqueued but the delivery could not be recorded; a later cycle repeats the alert rather than losing it"
+  mark_alert_delivered "$rec" \
+    || log ERROR "$key alert wake enqueued but the delivery could not be noted in its paused record; this episode may repeat its alert or close without a resume wake"
   log ALERT "$key at ${pct}% used (threshold ${THRESHOLD}%); resets_at=${resets_at:-unknown}; alert wake enqueued"
   return 0
 }
@@ -461,8 +499,11 @@ close_episode() {  # <key> <pct>
   if fm_wake_append check "quota-guard:resume:$key" \
     "check: quota-guard resume: $key refreshed to ${pct}% used (below threshold ${THRESHOLD}%); restart work paused for it per the quota-guard-cycle skill"
   then
-    rm -f "$rec" 2>/dev/null || true
-    log RESUME "$key refreshed to ${pct}%; resume wake enqueued and paused record cleared"
+    if clear_record "$key" "$rec"; then
+      log RESUME "$key refreshed to ${pct}%; resume wake enqueued and paused record cleared"
+    else
+      log RESUME "$key refreshed to ${pct}%; resume wake enqueued but its paused record could not be cleared"
+    fi
   else
     log ERROR "$key refreshed to ${pct}% but the resume wake could not be enqueued; record kept for the next cycle"
   fi
@@ -499,11 +540,21 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
     return 0
   fi
 
-  # An episode is open. Its alert is owed until the record says it was delivered,
-  # and an episode that still owes its alert cannot close: Firstmate was never
-  # told to pause, so a resume for it would answer a pause that never happened.
-  if [ "$(record_get "$rec" alert_delivered)" != 1 ]; then
-    deliver_alert "$key" "$pct" "$resets_at" "$rec" \
+  # An episode is open with its alert still owed. A window that has recovered
+  # before the alert was ever sent is abandoned outright: Firstmate was never
+  # told to pause, so there is nothing to resume, and pausing the fleet for a
+  # window that is healthy again is worse than never alerting at all. Otherwise
+  # the alert is retried, quoting the reading that opened the episode rather than
+  # this cycle's, so the wake cannot describe a window it does not mean.
+  if ! alert_delivered "$rec"; then
+    if ! pct_at_least "$pct" "$THRESHOLD"; then
+      clear_record "$key" "$rec"
+      log SUPPRESS "$key recovered to ${pct}% before its alert could be delivered; episode closed with no alert and no resume wake"
+      printf 'suppressed\n'
+      return 0
+    fi
+    deliver_alert "$key" "$(record_get "$rec" percent_used)" \
+      "$(record_get "$rec" resets_at)" "$rec" \
       && { printf 'alerted\n'; return 0; }
     printf 'error\n'
     return 0
@@ -566,6 +617,7 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
 poll_once() {
   local tsv key status pct resets_at verdict
   local n_alerted=0 n_resumed=0 n_paused=0 n_skipped=0 n_clear=0 n_error=0 summary
+  local n_suppressed=0
 
   # One display timestamp for the whole cycle: every log line and record written
   # by this poll shares it, which also keeps the cycle to a single `date` fork.
@@ -597,12 +649,13 @@ poll_once() {
       skipped) n_skipped=$((n_skipped + 1)) ;;
       clear) n_clear=$((n_clear + 1)) ;;
       error) n_error=$((n_error + 1)) ;;
+      suppressed) n_suppressed=$((n_suppressed + 1)) ;;
     esac
   done <<EOF
 $tsv
 EOF
 
-  summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped errors=$n_error"
+  summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped suppressed=$n_suppressed errors=$n_error"
   printf '%s\t%s\t%s\n' "$(now_epoch)" "$(now_iso)" "$summary" > "$LAST_POLL" 2>/dev/null || true
   log POLL "$summary"
   POLL_ISO=
