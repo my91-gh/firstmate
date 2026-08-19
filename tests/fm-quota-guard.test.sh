@@ -616,6 +616,56 @@ test_delivery_note_survives_an_unwritable_paused_directory() {
   pass "an unwritable paused directory neither repeats the alert nor blocks the resume"
 }
 
+# The same write fault that blocks a rewrite also blocks the unlink, so a closed
+# episode's record can outlive its own removal. Firstmate must be told to resume
+# once, not once every poll interval for as long as the fault lasts.
+test_resume_is_enqueued_once_when_the_paused_record_cannot_be_removed() {
+  local home paused n out
+  [ "$(id -u)" -ne 0 ] || { pass "skipped as root: file modes do not restrict writes"; return 0; }
+
+  home=$(make_home unremovable-record)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "setup: the episode must alert once before it can close"
+
+  paused="$home/state/.quota-guard/paused"
+  chmod a-w "$paused" || fail "setup: could not make the paused directory unwritable"
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" poll >/dev/null 2>&1
+  n=$(count_wakes "$home" "quota-guard:resume:claude/five_hour")
+  out=$(run_guard "$home" status 2>/dev/null)
+  chmod u+w "$paused" || fail "could not restore the paused directory"
+  [ "$n" -eq 1 ] \
+    || fail "a record that could not be removed must not resume again on every later poll (got $n)"
+  assert_contains "$out" "paused windows:
+  none" "a closed episode must not still be reported as paused"
+
+  # The window exhausts again while the stale record is still on disk. A closed
+  # record must not swallow a genuinely new episode once writes come back.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$AFTER_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 2 ] \
+    || fail "a new exhaustion after a closed episode must open its own episode and alert"
+
+  pass "a closed episode whose record cannot be removed resumes exactly once"
+}
+
 # quota-axi can report a window with no resetsAt at all. An episode opened there
 # has no time condition it can ever satisfy, so without adopting the first usable
 # reset it stays open forever and every task in its ledger stays paused.
@@ -668,6 +718,51 @@ test_episode_opened_without_a_usable_reset_still_resumes() {
   check_unusable_reset "$home" "not-a-time"
 
   pass "an episode opened without a usable resetsAt adopts one and still resumes on proof of refresh"
+}
+
+# A reset that passes with usage still at the wall makes the guard follow the
+# provider's new resetsAt. A reading it cannot read as a time must not replace
+# the usable one already recorded, or the episode loses the only time condition
+# it can satisfy and stays paused for good.
+test_unreadable_new_reset_does_not_strand_a_paused_episode() {
+  local home
+  home=$(make_home unreadable-new-reset)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "setup: the episode must open on the exhausted window"
+
+  # The recorded reset has passed, usage is still at the wall, and the provider
+  # now reports a resetsAt that is not a time at all.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:not-a-time" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  assert_grep "resets_at=$BEFORE_NOW" "$(record "$home" claude.five_hour)" \
+    "an unreadable resetsAt must not replace the reset time the episode already has"
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
+    || fail "usage still at the wall must never resume"
+
+  # The window refreshes while the provider is still reporting the unreadable
+  # resetsAt. The kept reset time is what lets this episode close.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:not-a-time" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "an episode whose provider reports an unreadable resetsAt must still resume on proof of refresh"
+  assert_absent "$(record "$home" claude.five_hour)" \
+    "resuming must clear the window's paused record"
+
+  pass "an unreadable new resetsAt never costs a paused episode its way to resume"
 }
 
 # --- resilience: bad data never decides anything -----------------------------
@@ -1080,9 +1175,11 @@ test_reset_decisions_read_the_injected_clock
 test_alert_wake_is_retried_while_the_window_is_still_exhausted
 test_undelivered_alert_is_suppressed_once_the_window_recovers
 test_delivery_note_survives_an_unwritable_paused_directory
+test_resume_is_enqueued_once_when_the_paused_record_cannot_be_removed
 test_unprovable_delivery_note_still_resumes
 test_queued_alert_blocks_suppressing_a_real_pause
 test_episode_opened_without_a_usable_reset_still_resumes
+test_unreadable_new_reset_does_not_strand_a_paused_episode
 test_stale_and_missing_data_never_decide
 test_stale_reading_cannot_resume_an_open_episode
 test_open_episode_survives_a_guard_restart

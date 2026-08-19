@@ -99,6 +99,16 @@
 # fallback would mean an exhausted window nobody is told about. The record's
 # last assignment of a field wins, which is what makes that append an update.
 #
+# A CLOSED EPISODE IS CLOSED EXACTLY ONCE, even when its record cannot be
+# removed. The same unwritable paused directory that fails a rewrite also fails
+# the unlink, and a record left on disk would otherwise be decided again on every
+# later cycle - enqueuing one more resume wake every poll interval, forever. So a
+# record that survives its own removal is APPENDED an episode_closed=1 marker,
+# which like the delivery note needs write permission on the record file alone,
+# and a record carrying it is read as absent: it neither resumes again nor
+# suppresses a genuinely new episode, and the removal is retried on each later
+# cycle so the stale file goes as soon as the directory allows it.
+#
 # One residual caveat, stated rather than hidden: if the note is written and the
 # enqueue then fails AND the guard cannot restore the note to 0, the episode
 # reads as delivered without an alert having been sent. It will not alert again
@@ -116,7 +126,11 @@
 # genuine roll, and that second path never resumes without the usage drop, so it
 # cannot resume prematurely. When the recorded reset passes with usage still at
 # the threshold, the guard records the provider's new resetsAt in place and stays
-# paused WITHOUT re-alerting: the episode is still the same episode.
+# paused WITHOUT re-alerting: the episode is still the same episode. Only a
+# resetsAt that can actually be read as a time replaces the recorded one; an
+# unreadable reading is logged and ignored, because overwriting a usable recorded
+# reset time with an unusable one would leave the episode with no time it can
+# ever compare, and so with no way to resume.
 #
 # An episode opened while resetsAt was missing or unparseable is still
 # resumable. The first later reading that carries a usable resetsAt is adopted
@@ -501,13 +515,26 @@ alert_provably_undelivered() {  # <key> <record-path>
   return 0
 }
 
-# Remove a closed episode's record. A record that outlives its removal is decided
-# again on the next cycle, so a failure here is logged rather than swallowed.
+# Remove a closed episode's record. A record that outlives its removal would be
+# decided again on the next cycle, so a failure here is logged rather than
+# swallowed and the caller marks the record closed instead.
 clear_record() {  # <key> <record-path>
   rm -f "$2" 2>/dev/null || true
   [ -f "$2" ] || return 0
-  log ERROR "$1 could not remove its paused record; the next cycle decides it again"
+  log ERROR "$1 could not remove its paused record; the record is marked closed instead"
   return 1
+}
+
+# The durable note that an episode is over even though its record is still on
+# disk. Like the owed-alert note it is appended, so write permission on the
+# record file alone is enough: a paused directory that has turned unwritable can
+# stop the unlink but cannot stop the guard recording that the episode ended.
+mark_episode_closed() {  # <record-path>
+  printf 'episode_closed=1\n' >> "$1" 2>/dev/null
+}
+
+record_closed() {  # <record-path>
+  [ "$(record_get "$1" episode_closed)" = 1 ]
 }
 
 # The episode's one alert, noted before it is sent so that the guard never sends
@@ -539,8 +566,10 @@ close_episode() {  # <key> <pct>
   then
     if clear_record "$key" "$rec"; then
       log RESUME "$key refreshed to ${pct}%; resume wake enqueued and paused record cleared"
+    elif mark_episode_closed "$rec"; then
+      log RESUME "$key refreshed to ${pct}%; resume wake enqueued and its paused record marked closed because it could not be removed"
     else
-      log RESUME "$key refreshed to ${pct}%; resume wake enqueued but its paused record could not be cleared"
+      log ERROR "$key refreshed to ${pct}% and its resume wake was enqueued, but its paused record could be neither removed nor marked closed; later cycles may enqueue the resume again"
     fi
   else
     log ERROR "$key refreshed to ${pct}% but the resume wake could not be enqueued; record kept for the next cycle"
@@ -550,7 +579,7 @@ close_episode() {  # <key> <pct>
 # One tracked window, one reading. Returns a short verdict word for the summary.
 evaluate_window() {  # <key> <status> <pct> <resets_at>
   local key=$1 status=$2 pct=$3 resets_at=$4
-  local rec recorded_epoch recorded_at observed_epoch time_ok=0 now
+  local rec recorded_epoch recorded_at observed_epoch time_ok=0 now open_record
 
   rec=$(record_path "$key")
 
@@ -566,7 +595,20 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
     return 0
   fi
 
-  if [ ! -f "$rec" ]; then
+  # A record marked closed is not an open episode; it only outlived its own
+  # removal. Retry that removal - the fault that blocked it may be gone - and
+  # decide the window as if no record were there either way, so a closed episode
+  # can never be closed a second time.
+  if [ -f "$rec" ] && record_closed "$rec"; then
+    rm -f "$rec" 2>/dev/null || true
+    open_record=0
+  elif [ -f "$rec" ]; then
+    open_record=1
+  else
+    open_record=0
+  fi
+
+  if [ "$open_record" -eq 0 ]; then
     if pct_at_least "$pct" "$THRESHOLD"; then
       open_episode "$key" "$pct" "$resets_at" || { printf 'error\n'; return 0; }
       deliver_alert "$key" "$pct" "$resets_at" "$rec" \
@@ -588,7 +630,8 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
   # to the ordinary close path below, which can only ever emit a resume.
   if alert_provably_undelivered "$key" "$rec"; then
     if ! pct_at_least "$pct" "$THRESHOLD"; then
-      clear_record "$key" "$rec"
+      clear_record "$key" "$rec" || mark_episode_closed "$rec" \
+        || log ERROR "$key could be neither removed nor marked closed; a later cycle may decide it again"
       log SUPPRESS "$key recovered to ${pct}% before its alert could be delivered; episode closed with no alert and no resume wake"
       printf 'suppressed\n'
       return 0
@@ -638,10 +681,16 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
   if [ "$time_ok" -eq 1 ]; then
     # The reset came and went with usage still at the wall. Keep the episode and
     # follow the provider's new resetsAt so the next check tests the real window.
-    if [ -n "$resets_at" ] && [ "$resets_at" != "$recorded_at" ]; then
-      record_set "$rec" "resets_at=$resets_at" "resets_epoch=${observed_epoch:-}" \
+    # A reading that cannot be read as a time is not followed: replacing a usable
+    # recorded epoch with an unusable one would leave the episode with no time it
+    # can ever compare, and so with no way to resume.
+    if [ -n "$resets_at" ] && [ "$resets_at" != "$recorded_at" ] \
+      && epoch_usable "$observed_epoch"; then
+      record_set "$rec" "resets_at=$resets_at" "resets_epoch=$observed_epoch" \
         || log ERROR "$key could not refresh its recorded reset time"
       log WAIT "$key reset time passed but usage is still ${pct}%; still paused, now tracking resets_at=$resets_at"
+    elif [ -n "$resets_at" ] && [ "$resets_at" != "$recorded_at" ]; then
+      log WAIT "$key reset time passed but usage is still ${pct}%; its new resets_at=$resets_at cannot be read as a time, so the episode keeps resets_at=${recorded_at:-unknown}"
     else
       log WAIT "$key reset time passed but usage is still ${pct}%; still paused, not resuming"
     fi
@@ -859,6 +908,7 @@ EOF
   for key in $TRACKED_WINDOWS; do
     rec=$(record_path "$key")
     [ -f "$rec" ] || continue
+    record_closed "$rec" && continue
     count=$((count + 1))
     printf '  %s: alerted %s at %s%% used, waiting for reset %s\n' \
       "$key" "$(record_get "$rec" alerted_at)" "$(record_get "$rec" percent_used)" \
