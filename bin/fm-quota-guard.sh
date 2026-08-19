@@ -61,28 +61,50 @@
 # exhausted for hours produces one wake, not one every two minutes.
 #
 # An alert wake that cannot be enqueued is never dropped. The episode stays open
-# with no delivery recorded, the failure is logged loudly, and the enqueue is
+# with alert_delivered=0, the failure is logged loudly, and the enqueue is
 # RETRIED on every later cycle for as long as the window is still at or above
 # the threshold. A retried alert quotes the percent_used and resets_at STORED in
 # the record, never the current reading, so the wake always describes the
 # exhaustion it was raised for and can never contradict itself.
 #
-# An episode whose alert was never delivered and whose window has since dropped
-# back below the threshold is CLOSED SILENTLY: the record is removed and neither
-# an alert nor a resume wake is enqueued. Firstmate was never told to pause, so
-# there is nothing to resume, and pausing the fleet for a window that is healthy
-# again is worse than never alerting for one that recovered on its own. The
-# suppression is logged.
+# The note is written BEFORE the wake is enqueued, and that ordering is what
+# makes alert_delivered=0 mean something. Recorded first, a note the guard could
+# not write stops the enqueue outright, so the guard can never send an alert it
+# has no record of sending. Were the order reversed, a note lost to a full or
+# read-only filesystem would be indistinguishable from an alert that was never
+# sent - and the guard would then have to guess, on the one decision where
+# guessing wrong pauses the fleet forever.
 #
-# The delivery note is APPENDED to the record rather than rewritten through it,
-# because an append needs write permission on the record file alone. A paused
-# directory that turns unwritable - a permissions change, a read-only remount -
-# fails every rewrite, and an alert that is enqueued but cannot be noted would
-# then be enqueued again on every single cycle, which is the opposite of the
-# once-per-episode rule above. Resume is not gated on that note either: an
-# episode whose alert WAS delivered closes and enqueues its resume wake on proof
-# of refresh, so no write fault can strand the fleet paused. Both writes are
-# durable, so an episode and its owed alert survive a guard restart.
+# An episode is CLOSED SILENTLY - record removed, no alert wake and no resume
+# wake - only on POSITIVE PROOF that its alert was never delivered: the record
+# reads alert_delivered=0 AND no alert wake for that window is queued, and the
+# window has since dropped back below the threshold. Firstmate was never told to
+# pause, so there is nothing to resume, and pausing the fleet for a window that
+# is healthy again is worse than never alerting for one that recovered on its
+# own. The suppression is logged.
+#
+# ANY OTHER STATE COUNTS AS DELIVERED. A record whose note is missing, garbled,
+# or unreadable - one written by an older guard, or damaged by a write fault -
+# closes through the ordinary resume path and emits its resume wake. The
+# asymmetry is deliberate: a resume for a pause that never happened costs one
+# empty resume-tasks call, while a suppressed resume for a pause that did happen
+# leaves every crewmate parked forever. So resume is never gated on the note,
+# and no write fault can strand the fleet paused.
+#
+# The note is written through the record rewrite when it can be, and APPENDED
+# when it cannot, because an append needs write permission on the record file
+# alone. A paused directory that turns unwritable - a permissions change, a
+# read-only remount - fails every rewrite, and an alert whose note cannot be
+# written at all is an alert this guard declines to send, which without the
+# fallback would mean an exhausted window nobody is told about. The record's
+# last assignment of a field wins, which is what makes that append an update.
+#
+# One residual caveat, stated rather than hidden: if the note is written and the
+# enqueue then fails AND the guard cannot restore the note to 0, the episode
+# reads as delivered without an alert having been sent. It will not alert again
+# and may emit a resume for a pause that never happened. That is the safe
+# direction of the same asymmetry, it is logged as an ERROR, and it still cannot
+# strand the fleet.
 #
 # RESUME requires PROOF OF REFRESH, not just elapsed time. A resetsAt that has
 # passed is necessary but not sufficient: the provider may not have rolled the
@@ -342,8 +364,14 @@ tasks_path() {  # <provider>/<window> -> per-window task ledger dir
   printf '%s/%s\n' "$PAUSED_TASKS_DIR" "${1%/*}.${1#*/}"
 }
 
+# The LAST assignment of a field wins, so a value appended to the record updates
+# it exactly as a rewrite would. Records normally hold one line per field, so
+# this differs from first-wins only where an append has already been used.
 record_get() {  # <record-path> <field>
-  LC_ALL=C awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1" 2>/dev/null
+  LC_ALL=C awk -F= -v k="$2" '
+    $1 == k { sub(/^[^=]*=/, ""); v = $0; found = 1 }
+    END { if (found) print v }
+  ' "$1" 2>/dev/null
 }
 
 # One owner for every mutation of an open episode's record. Each <field>=<value>
@@ -369,7 +397,7 @@ record_set() {  # <record-path> <field>=<value>...
     {
       eq = index($0, "=")
       k = (eq > 0) ? substr($0, 1, eq - 1) : ""
-      if (k != "" && (k in want)) { print want[k]; done[k] = 1; next }
+      if (k != "" && (k in want)) { if (!(k in done)) print want[k]; done[k] = 1; next }
       print
     }
     END {
@@ -429,9 +457,9 @@ read_quota_windows() {  # -> TSV on stdout; nonzero when the read itself failed
 
 # --- the poll cycle ----------------------------------------------------------
 
-# Open the episode durably. The record carries no delivery note yet, so its
-# absence is what marks the alert as still owed - and what every retry, on this
-# cycle or a later one, has something to record against.
+# Open the episode durably. The record says its alert is still owed in so many
+# words, because only a note that positively reads not-delivered can ever be
+# grounds for cancelling an episode without resuming it.
 open_episode() {  # <key> <pct> <resets_at>
   local key=$1 pct=$2 resets_at=$3 rec resets_epoch
   rec=$(record_path "$key")
@@ -443,6 +471,7 @@ threshold=$THRESHOLD
 percent_used=$pct
 resets_at=$resets_at
 resets_epoch=$resets_epoch
+alert_delivered=0
 alerted_at=$(now_iso)
 alerted_epoch=$(now_epoch)
 EOF
@@ -453,18 +482,23 @@ EOF
   return 0
 }
 
-# The durable note that this episode's alert was delivered. Appended rather than
-# rewritten because an append needs write permission on the record file alone: a
-# paused directory that has turned unwritable must not be able to turn one
-# enqueued alert into an alert on every later cycle. record_set covers the
-# opposite fault, a record file that cannot be written in a directory that can.
-mark_alert_delivered() {  # <record-path>
-  printf 'alert_delivered=1\n' >> "$1" 2>/dev/null && return 0
-  record_set "$1" "alert_delivered=1"
+# The durable note of whether this episode's alert is owed or sent. Rewritten in
+# place when the paused directory allows it, appended when it does not: an append
+# needs write permission on the record file alone, so a directory that has turned
+# unwritable cannot stop the guard accounting for an alert.
+mark_alert_state() {  # <record-path> <0|1>
+  record_set "$1" "alert_delivered=$2" && return 0
+  printf 'alert_delivered=%s\n' "$2" >> "$1" 2>/dev/null
 }
 
-alert_delivered() {  # <record-path>
-  [ "$(record_get "$1" alert_delivered)" = 1 ]
+# Proof that the alert was never sent, which is the only thing that may cancel an
+# episode without resuming it. The record must say so itself, and the queue must
+# not still be holding an alert for the window - a note that is missing, garbled
+# or unreadable proves nothing and is never treated as proof.
+alert_provably_undelivered() {  # <key> <record-path>
+  [ "$(record_get "$2" alert_delivered)" = 0 ] || return 1
+  fm_wake_queued_keys check 2>/dev/null | grep -Fxq "quota-guard:alert:$1" && return 1
+  return 0
 }
 
 # Remove a closed episode's record. A record that outlives its removal is decided
@@ -476,19 +510,23 @@ clear_record() {  # <key> <record-path>
   return 1
 }
 
-# The episode's one alert, and the note that it was delivered. The note is what
-# suppresses every later alert, so an enqueue that fails leaves the episode
-# owing its alert and a later cycle tries again.
+# The episode's one alert, noted before it is sent so that the guard never sends
+# an alert it cannot account for. An enqueue that fails leaves the episode owing
+# its alert and a later cycle tries again.
 deliver_alert() {  # <key> <pct> <resets_at> <record-path>
   local key=$1 pct=$2 resets_at=$3 rec=$4
+  if ! mark_alert_state "$rec" 1; then
+    log ERROR "$key is at ${pct}% (threshold ${THRESHOLD}%) but its paused record could not be marked as alerted, so no alert wake was enqueued; the episode stays open and the alert is retried next cycle"
+    return 1
+  fi
   if ! fm_wake_append check "quota-guard:alert:$key" \
     "check: quota-guard alert: $key at ${pct}% used (threshold ${THRESHOLD}%), resets at ${resets_at:-unknown}; pause work per the quota-guard-cycle skill"
   then
     log ERROR "$key is at ${pct}% (threshold ${THRESHOLD}%) but the alert wake could not be enqueued; the episode stays open and the alert is retried next cycle"
+    mark_alert_state "$rec" 0 \
+      || log ERROR "$key could not restore the owed-alert note after a failed enqueue; this episode will not alert again and may emit a resume for a pause that never happened"
     return 1
   fi
-  mark_alert_delivered "$rec" \
-    || log ERROR "$key alert wake enqueued but the delivery could not be noted in its paused record; this episode may repeat its alert or close without a resume wake"
   log ALERT "$key at ${pct}% used (threshold ${THRESHOLD}%); resets_at=${resets_at:-unknown}; alert wake enqueued"
   return 0
 }
@@ -540,13 +578,15 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
     return 0
   fi
 
-  # An episode is open with its alert still owed. A window that has recovered
-  # before the alert was ever sent is abandoned outright: Firstmate was never
+  # An episode whose alert is PROVABLY still owed. A window that has recovered
+  # before that alert was ever sent is abandoned outright: Firstmate was never
   # told to pause, so there is nothing to resume, and pausing the fleet for a
   # window that is healthy again is worse than never alerting at all. Otherwise
   # the alert is retried, quoting the reading that opened the episode rather than
-  # this cycle's, so the wake cannot describe a window it does not mean.
-  if ! alert_delivered "$rec"; then
+  # this cycle's, so the wake cannot describe a window it does not mean. Every
+  # other state - noted as delivered, or not provable either way - falls through
+  # to the ordinary close path below, which can only ever emit a resume.
+  if alert_provably_undelivered "$key" "$rec"; then
     if ! pct_at_least "$pct" "$THRESHOLD"; then
       clear_record "$key" "$rec"
       log SUPPRESS "$key recovered to ${pct}% before its alert could be delivered; episode closed with no alert and no resume wake"

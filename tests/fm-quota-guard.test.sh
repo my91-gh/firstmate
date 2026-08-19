@@ -480,6 +480,90 @@ test_undelivered_alert_is_suppressed_once_the_window_recovers() {
   pass "an undelivered alert is suppressed when the window recovers first, with no resume"
 }
 
+# A delivery note can be lost to a write fault, or simply never have existed in a
+# record an older guard wrote. That state is NOT proof the alert was never sent,
+# and treating it as proof would cancel the resume for a pause Firstmate really
+# performed, parking every crewmate forever. An unprovable note must fall through
+# to the ordinary resume path instead.
+test_unprovable_delivery_note_still_resumes() {
+  local home rec
+  home=$(make_home lost-note)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "setup: the episode must alert"
+
+  # The note is gone: a full or read-only filesystem lost it, or the record
+  # predates the field. Everything else about the episode is intact.
+  rec=$(record "$home" claude.five_hour)
+  grep -v '^alert_delivered=' "$rec" > "$rec.stripped" \
+    && mv "$rec.stripped" "$rec" \
+    || fail "setup: could not strip the delivery note"
+
+  # Still exhausted: an unprovable note must not cancel the episode or re-alert.
+  run_guard "$home" poll >/dev/null 2>&1
+  assert_present "$rec" \
+    "an episode whose delivery note cannot be read must not be destroyed"
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "an unprovable note must not be read as an owed alert and re-alert"
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 0 ] \
+    || fail "an exhausted window must not resume whatever its note says"
+
+  # Refreshed: as far as anything can be established the fleet was paused, so it
+  # is owed its resume.
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "an episode with an unprovable note must still resume exactly once"
+  assert_absent "$rec" "resuming must clear the paused record"
+
+  pass "a delivery note that proves nothing resumes the fleet rather than stranding it"
+}
+
+# The other half of the proof: a record that reads not-delivered while an alert
+# for that window is still sitting in the durable queue is not proof either. The
+# alert plainly went out, so the episode owes a resume, not a silent close.
+test_queued_alert_blocks_suppressing_a_real_pause() {
+  local home rec
+  home=$(make_home queued-alert)
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:99:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "setup: the episode must alert"
+
+  # The note reads not-delivered again, the way a lost write would leave it,
+  # while the alert wake it denies is still queued and undrained.
+  rec=$(record "$home" claude.five_hour)
+  printf 'alert_delivered=0\n' >> "$rec" || fail "setup: could not rewrite the note"
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:2:$BEFORE_NOW" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "a queued alert proves the pause happened, so the episode must resume"
+  [ "$(count_wakes "$home" "quota-guard:alert:claude/five_hour")" -eq 1 ] \
+    || fail "the episode must not alert again on its way out"
+  assert_absent "$rec" "resuming must clear the paused record"
+
+  pass "a still-queued alert wake stops a lost note cancelling the pause it caused"
+}
+
 # The delivery note is the only thing standing between one alert and one alert
 # every two minutes, so it must survive the paused directory turning unwritable -
 # a permissions change or a read-only remount - while the wake queue still works.
@@ -996,6 +1080,8 @@ test_reset_decisions_read_the_injected_clock
 test_alert_wake_is_retried_while_the_window_is_still_exhausted
 test_undelivered_alert_is_suppressed_once_the_window_recovers
 test_delivery_note_survives_an_unwritable_paused_directory
+test_unprovable_delivery_note_still_resumes
+test_queued_alert_blocks_suppressing_a_real_pause
 test_episode_opened_without_a_usable_reset_still_resumes
 test_stale_and_missing_data_never_decide
 test_stale_reading_cannot_resume_an_open_episode
