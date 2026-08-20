@@ -32,9 +32,11 @@
 #              documents: stdio to /dev/null (the digest's stdout is a pipe read
 #              to EOF), nohup (outlive the launching shell), and its own process
 #              group (the digest's bounded child terminates its whole group).
-#              Fail-open by contract: a missing quota-axi or jq is a silent
-#              exit 0, because bin/fm-bootstrap.sh already owns the MISSING
-#              diagnostic for both, and no guard failure may block a session start.
+#              Fail-open by contract: a missing default reader (quota-axi) or a
+#              missing jq is a silent exit 0, because bin/fm-bootstrap.sh already
+#              owns the MISSING diagnostic for both, and no guard failure may
+#              block a session start. An explicit FM_QUOTA_GUARD_QUOTA_CMD
+#              supplies its own reader, so arming is not gated on quota-axi then.
 # poll         One cycle, for operators and tests. Takes the same per-cycle poll
 #              lock the loop takes, so a hand-run poll alongside a live guard
 #              serializes instead of racing it into a duplicate wake.
@@ -835,7 +837,11 @@ cmd_arm() {
   local pid monitor_was_on=0
   [ "${FM_QUOTA_GUARD_NO_ARM:-0}" != 1 ] || return 0
   guard_live_pid >/dev/null 2>&1 && return 0
-  command -v quota-axi >/dev/null 2>&1 || return 0
+  # quota-axi is only the DEFAULT reader. An explicit FM_QUOTA_GUARD_QUOTA_CMD
+  # replaces it outright, so gating on that binary would refuse to arm a guard
+  # that never intended to call it. jq parses every reading, so it is required
+  # either way.
+  [ -n "${FM_QUOTA_GUARD_QUOTA_CMD:-}" ] || command -v quota-axi >/dev/null 2>&1 || return 0
   command -v jq >/dev/null 2>&1 || return 0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
