@@ -67,6 +67,11 @@
 #          guesses at malformed or unsafe existing files, and secondmate homes
 #          await the primary-authoritative inherited value instead of creating
 #          their own.
+#          The same locked mutable local path also arms this home's background
+#          quota guard, which bin/fm-quota-guard.sh owns in full. The arm is
+#          silent, idempotent, and a no-op when a guard already runs or when
+#          quota-axi or jq is absent, and no guard failure blocks a session
+#          start.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -1121,6 +1126,17 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
+  # Idempotent quota-guard arm. It belongs to the LOCAL phase because arming is
+  # a fork, not a network call: the guard does its own polling in a detached
+  # process, so nothing here waits on a provider. It is deterministic rather than
+  # remembered, because a guard that depends on an agent recalling to start it is
+  # a guard that is off exactly when a long unattended session needs it.
+  # Silent and fail-open by contract: `arm` is a no-op when a guard already runs
+  # or when quota-axi or jq is absent, and bin/fm-quota-guard.sh owns every
+  # detail. The MISSING diagnostics for those two tools already have their owner
+  # in detect_local_tools, so this must not emit a second one, and no guard
+  # failure may block a session start.
+  "$SCRIPT_DIR/fm-quota-guard.sh" arm >/dev/null 2>&1 || true
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here
