@@ -500,9 +500,11 @@ test_unprovable_delivery_note_still_resumes() {
   # The note is gone: a full or read-only filesystem lost it, or the record
   # predates the field. Everything else about the episode is intact.
   rec=$(record "$home" claude.five_hour)
-  grep -v '^alert_delivered=' "$rec" > "$rec.stripped" \
-    && mv "$rec.stripped" "$rec" \
-    || fail "setup: could not strip the delivery note"
+  if grep -v '^alert_delivered=' "$rec" > "$rec.stripped"; then
+    mv "$rec.stripped" "$rec" || fail "setup: could not strip the delivery note"
+  else
+    fail "setup: could not strip the delivery note"
+  fi
 
   # Still exhausted: an unprovable note must not cancel the episode or re-alert.
   run_guard "$home" poll >/dev/null 2>&1
