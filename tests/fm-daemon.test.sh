@@ -589,7 +589,7 @@ test_escalate_batches_into_one_digest() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   afk_enter "$state"
@@ -615,7 +615,7 @@ test_escalate_batch_age_uses_first_append() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
@@ -732,7 +732,7 @@ test_afk_absent_daemon_does_not_inject() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "done: PR 1"
   # afk flag deliberately NOT set
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
@@ -858,18 +858,24 @@ test_pane_input_pending_detects_partial_input() {
   pass "pane_input_pending detects partial input on the cursor line"
 }
 
-test_pane_input_pending_blank_is_not_pending() {
+test_pane_input_pending_blank_defers_strict() {
+  # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
+  # 2026-08-09): a blank cursor row with no positive container proof is
+  # `unknown` and the injector DEFERS. The permissive rule this replaced read
+  # the same row as `empty` and injected - into whatever the blank row really
+  # was (a modal dialog, a dead shell between stale transcript rules, a
+  # mid-redraw pane). This assertion IS the posture divergence: if it ever
+  # reads not-pending again, the permissive rule has silently returned.
   local dir state fakebin capture
   dir=$(make_supercase pending-blank)
   state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  # Cursor line (line 3, cursor_y=2) is blank → not pending.
   printf 'some output\nmore output\n\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
     pane_input_pending "fakepane" \
-    && fail "blank composer line falsely detected as pending"
-  pass "pane_input_pending: blank cursor line is not pending"
+    || fail "a blank unidentified cursor row must defer under the strict rule, not read empty"
+  pass "pane_input_pending: a blank unidentified cursor row defers (strict container-proof rule)"
 }
 
 test_pane_input_pending_requires_proven_empty_prompt() {
@@ -949,17 +955,16 @@ test_tmux_composer_state_requires_matching_box_borders() {
   pass "fm_tmux_composer_state: only matching edge borders form a composer box"
 }
 
-test_pane_input_pending_honors_idle_override_after_border_strip() {
-  local dir state fakebin capture
+test_pane_input_pending_preserves_bright_placeholder_like_draft() {
+  local dir fakebin capture
   dir=$(make_supercase pending-custom-idle)
-  state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
   printf '╭────────────────╮\n│ custom idle>   │\n╰────────────────╯\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
-    && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
-  pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
+    || fail "bright placeholder-like input must remain pending in a styled capture"
+  pass "pane_input_pending preserves bright placeholder-like drafts in styled captures"
 }
 
 test_classify_signal_dedup_against_scan() {
@@ -1564,27 +1569,37 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
 
-test_fm_send_exits_nonzero_on_confirmed_swallow() {
-  # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
-  # (text left in the composer), so firstmate learns the instruction did not land
-  # — and exit ZERO on a clean submit.
-  local dir fakebin err
+test_fm_send_reports_delivered_unconfirmed_submit() {
+  # When text was typed and Enter sent but the submit read-back remains pending,
+  # fm-send must return its documented delivered-unconfirmed status and prevent
+  # a duplicate resend reflex. A synchronously confirmed submit remains zero.
+  local dir fakebin err rc
   dir=$(make_bordered_case send-swallow)
   fakebin="$dir/fakebin"; err="$dir/send.err"
   # Clean submit -> exit 0.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
-  # Persistent swallow -> exit non-zero with a clear message.
+  # Persistent composer text after Enter -> delivered-unconfirmed exit 3 with
+  # a non-error warning that explicitly tells the operator not to resend.
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:win 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero despite a swallowed Enter (silent unsubmitted instruction)"
+    rc=0
+  else
+    rc=$?
   fi
-  grep -F 'not submitted' "$err" >/dev/null || fail "fm-send did not explain the swallowed submit: $(cat "$err")"
-  pass "fm-send exits non-zero on a confirmed swallow, zero on a clean submit"
+  [ "$rc" -eq 3 ] || fail "fm-send returned $rc instead of delivered-unconfirmed exit 3: $(cat "$err")"
+  grep -F 'submission is unconfirmed' "$err" >/dev/null \
+    || fail "fm-send did not explain the pending confirmation: $(cat "$err")"
+  grep -F 'do not retype or blindly resend' "$err" >/dev/null \
+    || fail "fm-send did not prevent a duplicate resend: $(cat "$err")"
+  if grep -F 'error:' "$err" >/dev/null; then
+    fail "fm-send mislabeled delivered-unconfirmed as an error: $(cat "$err")"
+  fi
+  pass "fm-send returns 3 with a non-error no-resend warning when confirmation stays pending"
 }
 
 test_fm_send_exits_nonzero_on_initial_send_failure() {
@@ -1871,12 +1886,12 @@ test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
 test_pane_input_pending_detects_partial_input
-test_pane_input_pending_blank_is_not_pending
+test_pane_input_pending_blank_defers_strict
 test_pane_input_pending_requires_proven_empty_prompt
 test_tmux_composer_state_bare_shell_is_unknown
 test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
-test_pane_input_pending_honors_idle_override_after_border_strip
+test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
@@ -1911,7 +1926,7 @@ test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
-test_fm_send_exits_nonzero_on_confirmed_swallow
+test_fm_send_reports_delivered_unconfirmed_submit
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
