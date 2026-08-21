@@ -7,9 +7,10 @@
 # safely parked. Quota exhaustion is knowable BEFORE it bites (quota-axi reports
 # percentUsed and the window's resetsAt), but only if something watches
 # continuously - a session that is busy supervising will not poll on its own.
-# So this is a background loop, and it produces DURABLE WAKES rather than acting:
-# the guard signals, Firstmate decides and acts. See the quota-guard-cycle skill
-# for what Firstmate does with each wake.
+# So this is a background loop that signals with DURABLE WAKES. The guard never
+# decides quota policy or resumes workers. Its reset nudge only accelerates
+# delivery after a resume wake is durable. Firstmate decides and acts. See the
+# quota-guard-cycle skill for what Firstmate does with each wake.
 #
 # Usage:
 #   fm-quota-guard.sh start          run the poll loop in the foreground
@@ -27,7 +28,9 @@
 #              is a harmless no-op rather than a second poller. Traps INT/TERM/HUP
 #              and releases the lock on the way out.
 # arm          What a session start calls. Returns immediately, leaves nothing on
-#              stdout, and is a no-op when a live guard already holds the lock.
+#              stdout, and first tries to bind the lock-owning primary for reset
+#              nudges. If a live guard exists, `arm` does not launch a second
+#              loop.
 #              Detached three ways for the reasons bin/fm-startup-network.sh
 #              documents: stdio to /dev/null (the digest's stdout is a pipe read
 #              to EOF), nohup (outlive the launching shell), and its own process
@@ -140,6 +143,16 @@
 # episode staying open forever with every task in its ledger paused. Adoption
 # moves only the time condition; the usage drop is still required, so it is
 # never a way to resume on elapsed time alone.
+#
+# THE RESET NUDGE IS ONLY AN ACCELERATOR. After one or more resume wakes from a
+# poll are durable, the guard launches one detached injection attempt for this
+# home's bound primary. `arm` can refresh that binding only from the session
+# that owns this home's lock. The injector refuses a changed or reused session
+# identity, a busy primary, or a composer that is not positively empty. Away
+# mode skips the nudge. A missing, stale, impossible, or failed nudge never
+# blocks the poll, and the queued wake remains the system of record. The nudge
+# path never drains the wake, reads the paused-task ledger, restarts a worker,
+# or starts a second supervision cycle.
 #
 # STALE AND MISSING DATA NEVER DECIDE ANYTHING. A failed quota-axi call, a
 # provider absent from the output, a provider whose state.stale is true, a
