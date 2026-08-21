@@ -141,6 +141,7 @@ make_supercase() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_CALLS:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALLS"
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1

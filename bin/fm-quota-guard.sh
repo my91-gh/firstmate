@@ -7,9 +7,10 @@
 # safely parked. Quota exhaustion is knowable BEFORE it bites (quota-axi reports
 # percentUsed and the window's resetsAt), but only if something watches
 # continuously - a session that is busy supervising will not poll on its own.
-# So this is a background loop, and it produces DURABLE WAKES rather than acting:
-# the guard signals, Firstmate decides and acts. See the quota-guard-cycle skill
-# for what Firstmate does with each wake.
+# So this is a background loop that signals with DURABLE WAKES. The guard never
+# decides quota policy or resumes workers. Its reset nudge only accelerates
+# delivery after a resume wake is durable. Firstmate decides and acts. See the
+# quota-guard-cycle skill for what Firstmate does with each wake.
 #
 # Usage:
 #   fm-quota-guard.sh start          run the poll loop in the foreground
@@ -27,7 +28,9 @@
 #              is a harmless no-op rather than a second poller. Traps INT/TERM/HUP
 #              and releases the lock on the way out.
 # arm          What a session start calls. Returns immediately, leaves nothing on
-#              stdout, and is a no-op when a live guard already holds the lock.
+#              stdout, and first tries to bind the lock-owning primary for reset
+#              nudges. If a live guard exists, `arm` does not launch a second
+#              loop.
 #              Detached three ways for the reasons bin/fm-startup-network.sh
 #              documents: stdio to /dev/null (the digest's stdout is a pipe read
 #              to EOF), nohup (outlive the launching shell), and its own process
@@ -141,6 +144,16 @@
 # moves only the time condition; the usage drop is still required, so it is
 # never a way to resume on elapsed time alone.
 #
+# THE RESET NUDGE IS ONLY AN ACCELERATOR. After one or more resume wakes from a
+# poll are durable, the guard launches one detached injection attempt for this
+# home's bound primary. `arm` can refresh that binding only from the session
+# that owns this home's lock. The injector refuses a changed or reused session
+# identity, a busy primary, or a composer that is not positively empty. Away
+# mode skips the nudge. A missing, stale, impossible, or failed nudge never
+# blocks the poll, and the queued wake remains the system of record. The nudge
+# path never drains the wake, reads the paused-task ledger, restarts a worker,
+# or starts a second supervision cycle.
+#
 # STALE AND MISSING DATA NEVER DECIDE ANYTHING. A failed quota-axi call, a
 # provider absent from the output, a provider whose state.stale is true, a
 # missing window, and a non-numeric percentUsed are each logged loudly and then
@@ -189,6 +202,11 @@
 #   .quota-guard/paused/<p>.<w>      one durable episode record per window
 #   .quota-guard/paused-tasks/<p>.<w>/<task-id>
 #                                    Firstmate's durable per-task pause ledger
+#   .quota-guard/primary-binding     primary session pid and process identity,
+#                                    backend, target, and harness captured by
+#                                    `arm` inside this home's lock-owning session;
+#                                    reset nudges refuse a missing, stale, reused,
+#                                    or changed binding
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -200,6 +218,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 
 GUARD_DIR="$STATE/.quota-guard"
 GUARD_LOCK="$GUARD_DIR/guard.lock"
@@ -208,6 +230,7 @@ LOG_FILE="$GUARD_DIR/guard.log"
 LAST_POLL="$GUARD_DIR/last-poll"
 PAUSED_DIR="$GUARD_DIR/paused"
 PAUSED_TASKS_DIR="$GUARD_DIR/paused-tasks"
+PRIMARY_BINDING="$GUARD_DIR/primary-binding"
 
 # The constant tracked set. See the TRACKED WINDOWS note in the header.
 TRACKED_WINDOWS="claude/five_hour claude/seven_day codex/weekly"
@@ -573,9 +596,84 @@ close_episode() {  # <key> <pct>
     else
       log ERROR "$key refreshed to ${pct}% and its resume wake was enqueued, but its paused record could be neither removed nor marked closed; later cycles may enqueue the resume again"
     fi
+    return 0
   else
     log ERROR "$key refreshed to ${pct}% but the resume wake could not be enqueued; record kept for the next cycle"
+    return 1
   fi
+}
+
+# Launch one accelerator after every resume from this poll is durable. The
+# detached process prevents an unavailable backend from holding the poll lock or
+# stopping this loop. It rechecks this home's exact session pid before it types,
+# and the shared injector refuses busy or non-empty primary composers.
+launch_resume_nudge() {
+  local current_pid current_identity bound_pid bound_identity
+  local bound_backend bound_target bound_harness message
+  [ ! -e "$STATE/.afk" ] || { log NUDGE "reset nudge skipped because away-mode supervision is active"; return 0; }
+  bound_pid=$(sed -n 's/^session_pid=//p' "$PRIMARY_BINDING" 2>/dev/null)
+  bound_identity=$(sed -n 's/^session_identity=//p' "$PRIMARY_BINDING" 2>/dev/null)
+  bound_backend=$(sed -n 's/^backend=//p' "$PRIMARY_BINDING" 2>/dev/null)
+  bound_target=$(sed -n 's/^target=//p' "$PRIMARY_BINDING" 2>/dev/null)
+  bound_harness=$(sed -n 's/^harness=//p' "$PRIMARY_BINDING" 2>/dev/null)
+  case "$bound_pid" in
+    ''|*[!0-9]*) log NUDGE "resume wakes retained; no home-bound primary nudge is available"; return 1 ;;
+  esac
+  current_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  [ "$current_pid" = "$bound_pid" ] \
+    || { log NUDGE "resume wakes retained; the home primary session binding changed"; return 1; }
+  kill -0 "$current_pid" 2>/dev/null \
+    || { log NUDGE "resume wakes retained; the home primary session is gone"; return 1; }
+  current_identity=$(fm_pid_identity "$current_pid" 2>/dev/null || true)
+  [ -n "$bound_identity" ] && [ "$current_identity" = "$bound_identity" ] \
+    || { log NUDGE "resume wakes retained; the home primary session identity changed"; return 1; }
+  [ -n "$bound_target" ] && [ -n "$bound_backend" ] && [ -n "$bound_harness" ] \
+    || { log NUDGE "resume wakes retained; no home-bound primary target is available"; return 1; }
+
+  message="FIRSTMATE WATCHER WAKE: quota guard queued one or more quota resumes. Run bin/fm-wake-drain.sh first and handle the queued wakes. The queued wakes are durable; this message only starts the idle turn."
+  nohup env \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_SUPERVISOR_TARGET="$bound_target" \
+    FM_SUPERVISOR_BACKEND="$bound_backend" \
+    FM_SUPERVISOR_SESSION_PID="$bound_pid" \
+    FM_SUPERVISOR_SESSION_IDENTITY="$bound_identity" \
+    FM_SUPERVISOR_PRIMARY_HARNESS="$bound_harness" \
+    FM_INJECT_CONFIRM_RETRIES=3 \
+    FM_INJECT_CONFIRM_SLEEP=0.5 \
+    "$SCRIPT_DIR/fm-supervisor-inject.sh" watcher "$message" \
+    >/dev/null 2>&1 </dev/null &
+  log NUDGE "resume wakes enqueued; one home-bound idle-primary nudge launched"
+  return 0
+}
+
+write_primary_binding() {
+  local session_pid session_identity backend target harness tmp
+  fm_session_lock_owned_by_self "$STATE" || return 1
+  session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  session_identity=$(fm_pid_identity "$session_pid" 2>/dev/null) || return 1
+
+  if [ -n "${TMUX_PANE:-}" ]; then
+    backend=tmux
+    target=$TMUX_PANE
+  elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    backend=herdr
+    target="${HERDR_SESSION:-default}:$HERDR_PANE_ID"
+  else
+    return 1
+  fi
+  harness=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)
+  case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;; *) return 1 ;; esac
+
+  tmp="$PRIMARY_BINDING.tmp.$$"
+  if printf 'session_pid=%s\nsession_identity=%s\nbackend=%s\ntarget=%s\nharness=%s\n' \
+    "$session_pid" "$session_identity" "$backend" "$target" "$harness" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$PRIMARY_BINDING" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 # One tracked window, one reading. Returns a short verdict word for the summary.
@@ -675,8 +773,11 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
   fi
 
   if [ "$time_ok" -eq 1 ] && ! pct_at_least "$pct" "$THRESHOLD"; then
-    close_episode "$key" "$pct"
-    printf 'resumed\n'
+    if close_episode "$key" "$pct"; then
+      printf 'resumed\n'
+    else
+      printf 'error\n'
+    fi
     return 0
   fi
 
@@ -746,6 +847,9 @@ poll_once() {
 $tsv
 EOF
 
+  if [ "$n_resumed" -gt 0 ]; then
+    launch_resume_nudge || true
+  fi
   summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped suppressed=$n_suppressed errors=$n_error"
   printf '%s\t%s\t%s\n' "$(now_epoch)" "$(now_iso)" "$summary" > "$LAST_POLL" 2>/dev/null || true
   log POLL "$summary"
@@ -836,6 +940,11 @@ cmd_start() {
 cmd_arm() {
   local pid monitor_was_on=0
   [ "${FM_QUOTA_GUARD_NO_ARM:-0}" != 1 ] || return 0
+  # Refresh the nudge identity even when this home already has a live guard.
+  # This lets a replacement primary take custody without restarting the guard.
+  # Failure is intentionally inert: quota detection and durable wake delivery
+  # do not depend on this optional accelerator.
+  write_primary_binding || true
   guard_live_pid >/dev/null 2>&1 && return 0
   # quota-axi is only the DEFAULT reader. An explicit FM_QUOTA_GUARD_QUOTA_CMD
   # replaces it outright, so gating on that binary would refuse to arm a guard
