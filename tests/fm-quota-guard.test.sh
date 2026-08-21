@@ -394,15 +394,61 @@ test_silent_primary_receives_the_queued_resume_without_human_input() {
   pass "a reset wakes an idle primary through the verified delivery path and remains home-scoped"
 }
 
+test_multiple_resets_start_one_idle_primary_turn() {
+  local home fakebin sent calls capture body launches
+  home=$(make_supercase multiple-primary-resumes)
+  fakebin="$home/fakebin"
+  sent="$home/sent.log"; : > "$sent"
+  calls="$home/tmux-calls.log"; : > "$calls"
+  capture="$home/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  write_primary_binding "$home" home-primary
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:98:2026-08-18T13:00:00Z" \
+      "seven_day:weekly:98:2026-08-18T13:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:0:2026-08-18T18:00:00Z" \
+      "seven_day:weekly:0:2026-08-18T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  NOW_EPOCH=1787061600 \
+  PATH="$fakebin:$PATH" \
+  FM_FAKE_TMUX_PANE_ALIVE=1 \
+  FM_FAKE_TMUX_SENT="$sent" \
+  FM_FAKE_TMUX_CALLS="$calls" \
+  FM_FAKE_TMUX_CAPTURE="$capture" \
+    run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=
+
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "the five-hour reset must leave one durable resume wake"
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/seven_day")" -eq 1 ] \
+    || fail "the seven-day reset must leave one durable resume wake"
+  launches=$(grep -Fc "home-bound idle-primary nudge launched" "$(guard_log "$home")" 2>/dev/null || true)
+  [ "$launches" -eq 1 ] \
+    || fail "two resets in one poll must launch one idle-primary nudge (got $launches)"
+  wait_for_pattern "[ENTER]" "$sent" \
+    || fail "the coalesced reset nudge did not start the idle primary turn"
+  body=$(cat "$sent")
+  assert_contains "$body" "FIRSTMATE_OP: v1 watcher:" \
+    "the coalesced reset nudge must use the existing typed watcher carrier"
+
+  pass "multiple resets in one poll start one idle-primary turn"
+}
+
 test_busy_primary_keeps_the_resume_wake_without_injection() {
-  local home fakebin sent calls capture
+  local home fakebin sent calls capture identity
   home=$(make_supercase busy-primary-resume)
   fakebin="$home/fakebin"
   sent="$home/sent.log"; : > "$sent"
   calls="$home/tmux-calls.log"; : > "$calls"
   capture="$home/pane.txt"; printf 'esc to interrupt\n' > "$capture"
   printf '%s\n' "$$" > "$home/state/.lock"
-  write_primary_binding "$home" home-primary
 
   write_quota "$home" \
     "$(provider_json claude false \
@@ -417,19 +463,33 @@ test_busy_primary_keeps_the_resume_wake_without_injection() {
       "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
     "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
 
-  NOW_EPOCH=1787061600 \
-  PATH="$fakebin:$PATH" \
-  FM_FAKE_TMUX_PANE_ALIVE=1 \
-  FM_FAKE_TMUX_SENT="$sent" \
-  FM_FAKE_TMUX_CALLS="$calls" \
-  FM_FAKE_TMUX_CAPTURE="$capture" \
-    run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=1787061600 run_guard "$home" poll >/dev/null 2>&1
   NOW_EPOCH=
 
   [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
     || fail "a busy primary must not cost the durable resume wake"
-  wait_for_pattern "capture-pane" "$calls" \
-    || fail "the reset nudge did not inspect the primary's busy state"
+  write_primary_binding "$home" home-primary
+  identity=$(sed -n 's/^session_identity=//p' "$home/state/.quota-guard/primary-binding")
+  if PATH="$fakebin:$PATH" \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CALLS="$calls" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" \
+    FM_SUPERVISOR_TARGET=home-primary \
+    FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_SESSION_PID="$$" \
+    FM_SUPERVISOR_SESSION_IDENTITY="$identity" \
+    FM_SUPERVISOR_PRIMARY_HARNESS=claude \
+    "$ROOT/bin/fm-supervisor-inject.sh" watcher \
+      "Run bin/fm-wake-drain.sh first and handle the queued resume wake." \
+      >/dev/null 2>&1
+  then
+    fail "the shared injector accepted a busy primary"
+  fi
+  assert_grep "capture-pane" "$calls" \
+    "the reset nudge did not inspect the primary's busy state"
   [ ! -s "$sent" ] || fail "the reset nudge typed into a busy primary"
 
   pass "a busy primary is not injected and the resume wake stays durable"
@@ -1333,6 +1393,7 @@ test_refresh_before_reset_does_not_resume
 test_rolled_window_resumes_on_new_reset_plus_refresh
 test_alert_and_resume_wakes_are_distinguishable
 test_silent_primary_receives_the_queued_resume_without_human_input
+test_multiple_resets_start_one_idle_primary_turn
 test_busy_primary_keeps_the_resume_wake_without_injection
 test_changed_home_session_cannot_nudge_the_old_primary
 test_reset_decisions_read_the_injected_clock

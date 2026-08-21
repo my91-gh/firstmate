@@ -583,40 +583,41 @@ close_episode() {  # <key> <pct>
     else
       log ERROR "$key refreshed to ${pct}% and its resume wake was enqueued, but its paused record could be neither removed nor marked closed; later cycles may enqueue the resume again"
     fi
-    launch_resume_nudge "$key" "$pct" || true
+    return 0
   else
     log ERROR "$key refreshed to ${pct}% but the resume wake could not be enqueued; record kept for the next cycle"
+    return 1
   fi
 }
 
-# Launch a one-shot accelerator only after the durable resume wake exists. The
+# Launch one accelerator after every resume from this poll is durable. The
 # detached process prevents an unavailable backend from holding the poll lock or
 # stopping this loop. It rechecks this home's exact session pid before it types,
 # and the shared injector refuses busy or non-empty primary composers.
-launch_resume_nudge() {  # <key> <pct>
-  local key=$1 pct=$2 current_pid current_identity bound_pid bound_identity
+launch_resume_nudge() {
+  local current_pid current_identity bound_pid bound_identity
   local bound_backend bound_target bound_harness message
-  [ ! -e "$STATE/.afk" ] || { log NUDGE "$key reset nudge skipped because away-mode supervision is active"; return 0; }
+  [ ! -e "$STATE/.afk" ] || { log NUDGE "reset nudge skipped because away-mode supervision is active"; return 0; }
   bound_pid=$(sed -n 's/^session_pid=//p' "$PRIMARY_BINDING" 2>/dev/null)
   bound_identity=$(sed -n 's/^session_identity=//p' "$PRIMARY_BINDING" 2>/dev/null)
   bound_backend=$(sed -n 's/^backend=//p' "$PRIMARY_BINDING" 2>/dev/null)
   bound_target=$(sed -n 's/^target=//p' "$PRIMARY_BINDING" 2>/dev/null)
   bound_harness=$(sed -n 's/^harness=//p' "$PRIMARY_BINDING" 2>/dev/null)
   case "$bound_pid" in
-    ''|*[!0-9]*) log NUDGE "$key resume wake retained; no home-bound primary nudge is available"; return 1 ;;
+    ''|*[!0-9]*) log NUDGE "resume wakes retained; no home-bound primary nudge is available"; return 1 ;;
   esac
   current_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
   [ "$current_pid" = "$bound_pid" ] \
-    || { log NUDGE "$key resume wake retained; the home primary session binding changed"; return 1; }
+    || { log NUDGE "resume wakes retained; the home primary session binding changed"; return 1; }
   kill -0 "$current_pid" 2>/dev/null \
-    || { log NUDGE "$key resume wake retained; the home primary session is gone"; return 1; }
+    || { log NUDGE "resume wakes retained; the home primary session is gone"; return 1; }
   current_identity=$(fm_pid_identity "$current_pid" 2>/dev/null || true)
   [ -n "$bound_identity" ] && [ "$current_identity" = "$bound_identity" ] \
-    || { log NUDGE "$key resume wake retained; the home primary session identity changed"; return 1; }
+    || { log NUDGE "resume wakes retained; the home primary session identity changed"; return 1; }
   [ -n "$bound_target" ] && [ -n "$bound_backend" ] && [ -n "$bound_harness" ] \
-    || { log NUDGE "$key resume wake retained; no home-bound primary target is available"; return 1; }
+    || { log NUDGE "resume wakes retained; no home-bound primary target is available"; return 1; }
 
-  message="FIRSTMATE WATCHER WAKE: quota guard queued the $key resume at ${pct}% used. Run bin/fm-wake-drain.sh first and handle the queued wake. The queued wake is durable; this message only starts the idle turn."
+  message="FIRSTMATE WATCHER WAKE: quota guard queued one or more quota resumes. Run bin/fm-wake-drain.sh first and handle the queued wakes. The queued wakes are durable; this message only starts the idle turn."
   nohup env \
     FM_HOME="$FM_HOME" \
     FM_STATE_OVERRIDE="$STATE" \
@@ -629,7 +630,7 @@ launch_resume_nudge() {  # <key> <pct>
     FM_INJECT_CONFIRM_SLEEP=0.5 \
     "$SCRIPT_DIR/fm-supervisor-inject.sh" watcher "$message" \
     >/dev/null 2>&1 </dev/null &
-  log NUDGE "$key resume wake enqueued; one home-bound idle-primary nudge launched"
+  log NUDGE "resume wakes enqueued; one home-bound idle-primary nudge launched"
   return 0
 }
 
@@ -759,8 +760,11 @@ evaluate_window() {  # <key> <status> <pct> <resets_at>
   fi
 
   if [ "$time_ok" -eq 1 ] && ! pct_at_least "$pct" "$THRESHOLD"; then
-    close_episode "$key" "$pct"
-    printf 'resumed\n'
+    if close_episode "$key" "$pct"; then
+      printf 'resumed\n'
+    else
+      printf 'error\n'
+    fi
     return 0
   fi
 
@@ -830,6 +834,9 @@ poll_once() {
 $tsv
 EOF
 
+  if [ "$n_resumed" -gt 0 ]; then
+    launch_resume_nudge || true
+  fi
   summary="clear=$n_clear paused=$n_paused alerted=$n_alerted resumed=$n_resumed skipped=$n_skipped suppressed=$n_suppressed errors=$n_error"
   printf '%s\t%s\t%s\n' "$(now_epoch)" "$(now_iso)" "$summary" > "$LAST_POLL" 2>/dev/null || true
   log POLL "$summary"
