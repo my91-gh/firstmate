@@ -105,7 +105,7 @@ state/               runtime records and signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
-  .quota-guard/      quota guard lock, rotating log, and its durable paused-window and paused-task records; deleting a paused record loses a pending resume (section 13)
+  .quota-guard/      quota guard lock, rotating log, durable paused-window and paused-task records, and the home primary binding used only for reset nudges; deleting a paused record loses a pending resume (section 13)
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   decision-bindings/ private bindings from a captured-answer source id to one captain-hold origin or the cross-origin marker; written only by bin/fm-decision-hold.sh bind, dropped by unbind and by source retirement (section 13; docs/decision-hold-lifecycle.md)

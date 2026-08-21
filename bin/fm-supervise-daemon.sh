@@ -147,10 +147,10 @@ FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# Shared tmux pane primitives for supervisor injection (busy/composer detection
-# + verify-retry submit). Sourced at top level so BOTH the executed daemon and
-# the unit tests (which source this file for its pure functions) get the
-# corrected composer detection. Stale task rechecks use fm-backend.sh below.
+# Shared tmux pane primitives used by the backend adapters for composer capture
+# and verified submit. Sourced at top level so BOTH the executed daemon and the
+# unit tests (which source this file for pure functions) get the same corrected
+# composer detection. The backend-neutral injection boundary is sourced below.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 
@@ -180,6 +180,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# Shared idle-primary injection boundary. This preserves the daemon's AFK-only
+# policy while allowing another home-scoped caller to reuse the same busy,
+# composer, and verified-submit path.
+# shellcheck source=bin/fm-supervisor-inject.sh
+. "$FM_DAEMON_DIR/fm-supervisor-inject.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -204,8 +210,9 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection, submit acknowledgement, and the harness-scoped
-# supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
+# Composer capture and submit acknowledgement live in bin/fm-tmux-lib.sh.
+# The harness-scoped, backend-neutral injection boundary lives in
+# bin/fm-supervisor-inject.sh.
 # FM_BUSY_REGEX also overrides Grok's isolated task-state fallback.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
@@ -574,33 +581,9 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # Resolved lazily and memoized: harness detection walks process ancestry, which
 # is too heavy to pay on every source of this library (the unit tests and the
 # launcher source it purely for its pure functions).
-fm_daemon_primary_harness() {
-  if [ -z "${FM_DAEMON_PRIMARY_HARNESS:-}" ]; then
-    FM_DAEMON_PRIMARY_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
-    [ -n "$FM_DAEMON_PRIMARY_HARNESS" ] || FM_DAEMON_PRIMARY_HARNESS=unknown
-  fi
-  printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
-}
-
-pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} native tail40 harness
-  harness=$(fm_daemon_primary_harness)
-  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  case "$native" in
-    busy) return 0 ;;
-  esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
-}
-
-# pane_input_pending dispatches through fm_backend_composer_state and treats
-# every verdict except exact empty as unsafe. inject_msg reads the full verdict
-# directly and applies the same positive-proof boundary.
-pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
-}
+# pane_is_busy, pane_input_pending, and fm_daemon_primary_harness are provided by
+# bin/fm-supervisor-inject.sh. Their names stay stable for existing callers and
+# tests, while the safety-critical implementation now has one owner.
 
 task_window_backend() {  # <window> <state>
   local win=$1 state=$2 task meta
@@ -1114,7 +1097,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1125,8 +1108,6 @@ inject_msg() {  # <message> [state]
   # them. Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded || return 1
-  msg=$encoded
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
   # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
@@ -1134,40 +1115,12 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
-  fi
-  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
-  #      composer. The shared classifier (fm_backend_composer_state ->
-  #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
-  #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
-  #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
-  if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
-    return 1
-  fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the backend confirms
-  # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
-  # buffer is preserved (strict) rather than cleared.
-  # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
-  # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
-  # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
+  if fm_supervisor_inject away-supervisor "$msg" "$target" "$backend" "$retries" "$sleep_s"; then
+    return 0
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  log "inject deferred or failed: $FM_SUPERVISOR_INJECT_REASON"
   return 1
 }
 

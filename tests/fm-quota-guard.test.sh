@@ -9,9 +9,9 @@
 # network. Nothing here asserts implementation-source bytes.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/wake-helpers.sh
 # shellcheck disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 GUARD="$ROOT/bin/fm-quota-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-quota-guard)
@@ -99,6 +99,25 @@ count_wakes() {
   local home=$1 key=$2
   awk -F '\t' -v k="$key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' \
     "$(queue "$home")" 2>/dev/null || printf '0\n'
+}
+
+wait_for_pattern() {  # <pattern> <file>
+  local pattern=$1 file=$2 attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    grep -Fq "$pattern" "$file" 2>/dev/null && return 0
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+write_primary_binding() {  # <home> <target>
+  local home=$1 target=$2 identity
+  mkdir -p "$home/state/.quota-guard"
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$")
+  printf 'session_pid=%s\nsession_identity=%s\nbackend=tmux\ntarget=%s\nharness=claude\n' \
+    "$$" "$identity" "$target" > "$home/state/.quota-guard/primary-binding"
 }
 
 # --- alert: the 95% edge trigger --------------------------------------------
@@ -318,6 +337,146 @@ test_alert_and_resume_wakes_are_distinguishable() {
   assert_not_contains "$resume_line" "quota-guard alert" "the resume payload must not read as an alert"
 
   pass "alert and resume wakes carry distinct keys and distinct payloads"
+}
+
+# Reproduce the 2026-08-20/21 failure at its real boundary: no primary turn is
+# alive when the provider refreshes. The guard must retain the resume wake as
+# the system of record and use the same verified composer delivery path as the
+# away daemon to start one idle-primary turn. The fixture offers two targets so
+# an accidental global or fallback lookup could reach the sibling; only the
+# target bound to this home's session is allowed to receive text.
+test_silent_primary_receives_the_queued_resume_without_human_input() {
+  local home fakebin sent calls capture body
+  home=$(make_supercase silent-primary-resume)
+  fakebin="$home/fakebin"
+  sent="$home/sent.log"; : > "$sent"
+  calls="$home/tmux-calls.log"; : > "$calls"
+  capture="$home/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  write_primary_binding "$home" home-primary
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:98:2026-08-18T13:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" pause-task paused-crew claude/five_hour >/dev/null
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:0:2026-08-18T18:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  NOW_EPOCH=1787061600 \
+  PATH="$fakebin:$PATH" \
+  FM_FAKE_TMUX_PANE_ALIVE=1 \
+  FM_FAKE_TMUX_SENT="$sent" \
+  FM_FAKE_TMUX_CALLS="$calls" \
+  FM_FAKE_TMUX_CAPTURE="$capture" \
+    run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=
+
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "the reset must leave one durable resume wake"
+  wait_for_pattern "[ENTER]" "$sent" \
+    || fail "the reset queued a resume but did not start the idle primary turn"
+  body=$(cat "$sent")
+  assert_contains "$body" "FIRSTMATE_OP: v1 watcher:" \
+    "the reset nudge must use the existing typed watcher carrier"
+  assert_contains "$body" "fm-wake-drain.sh" \
+    "the reset nudge must direct Firstmate to the durable queue"
+  assert_contains "$(cat "$calls")" "-t home-primary" \
+    "the reset nudge did not use this home's bound primary target"
+  assert_not_contains "$(cat "$calls")" "sibling-primary" \
+    "the reset nudge touched a sibling home's primary target"
+
+  pass "a reset wakes an idle primary through the verified delivery path and remains home-scoped"
+}
+
+test_busy_primary_keeps_the_resume_wake_without_injection() {
+  local home fakebin sent calls capture
+  home=$(make_supercase busy-primary-resume)
+  fakebin="$home/fakebin"
+  sent="$home/sent.log"; : > "$sent"
+  calls="$home/tmux-calls.log"; : > "$calls"
+  capture="$home/pane.txt"; printf 'esc to interrupt\n' > "$capture"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  write_primary_binding "$home" home-primary
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:98:2026-08-18T13:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" pause-task paused-crew claude/five_hour >/dev/null
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:0:2026-08-18T18:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+
+  NOW_EPOCH=1787061600 \
+  PATH="$fakebin:$PATH" \
+  FM_FAKE_TMUX_PANE_ALIVE=1 \
+  FM_FAKE_TMUX_SENT="$sent" \
+  FM_FAKE_TMUX_CALLS="$calls" \
+  FM_FAKE_TMUX_CAPTURE="$capture" \
+    run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=
+
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "a busy primary must not cost the durable resume wake"
+  wait_for_pattern "capture-pane" "$calls" \
+    || fail "the reset nudge did not inspect the primary's busy state"
+  [ ! -s "$sent" ] || fail "the reset nudge typed into a busy primary"
+
+  pass "a busy primary is not injected and the resume wake stays durable"
+}
+
+test_changed_home_session_cannot_nudge_the_old_primary() {
+  local home fakebin sent calls capture stale_pid
+  home=$(make_supercase changed-home-session)
+  fakebin="$home/fakebin"
+  sent="$home/sent.log"; : > "$sent"
+  calls="$home/tmux-calls.log"; : > "$calls"
+  capture="$home/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  stale_pid=$(( $$ + 1 ))
+  printf '%s\n' "$$" > "$home/state/.lock"
+  mkdir -p "$home/state/.quota-guard"
+  printf 'session_pid=%s\nsession_identity=stale\nbackend=tmux\ntarget=sibling-primary\nharness=claude\n' \
+    "$stale_pid" > "$home/state/.quota-guard/primary-binding"
+
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:98:2026-08-18T13:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+  run_guard "$home" poll >/dev/null 2>&1
+  run_guard "$home" pause-task paused-crew claude/five_hour >/dev/null
+  write_quota "$home" \
+    "$(provider_json claude false \
+      "five_hour:session:0:2026-08-18T18:00:00Z" \
+      "seven_day:weekly:40:2026-08-23T18:00:00Z")" \
+    "$(provider_json codex false "weekly:weekly:10:2026-08-20T15:00:00Z")"
+
+  NOW_EPOCH=1787061600 \
+  PATH="$fakebin:$PATH" \
+  FM_FAKE_TMUX_PANE_ALIVE=1 \
+  FM_FAKE_TMUX_SENT="$sent" \
+  FM_FAKE_TMUX_CALLS="$calls" \
+  FM_FAKE_TMUX_CAPTURE="$capture" \
+    run_guard "$home" poll >/dev/null 2>&1
+  NOW_EPOCH=
+
+  [ "$(count_wakes "$home" "quota-guard:resume:claude/five_hour")" -eq 1 ] \
+    || fail "a changed session binding must not cost the durable resume wake"
+  [ ! -s "$sent" ] || fail "a changed home session injected into the old primary"
+  assert_not_contains "$(cat "$calls")" "sibling-primary" \
+    "this home's guard reached the primary from an obsolete session binding"
+
+  pass "a changed home session invalidates its old target before any sibling primary can be touched"
 }
 
 # The reset side of every decision reads the clock through FM_QUOTA_GUARD_NOW.
@@ -1173,6 +1332,9 @@ test_resume_requires_reset_and_refresh
 test_refresh_before_reset_does_not_resume
 test_rolled_window_resumes_on_new_reset_plus_refresh
 test_alert_and_resume_wakes_are_distinguishable
+test_silent_primary_receives_the_queued_resume_without_human_input
+test_busy_primary_keeps_the_resume_wake_without_injection
+test_changed_home_session_cannot_nudge_the_old_primary
 test_reset_decisions_read_the_injected_clock
 test_alert_wake_is_retried_while_the_window_is_still_exhausted
 test_undelivered_alert_is_suppressed_once_the_window_recovers
