@@ -1,0 +1,10 @@
+# Engineering-rigor deterministic trigger - mode matrix
+
+Generated via bin/fm-brief.sh across all three ship modes plus scout and secondmate.
+Count = occurrences of 'engineering-rigor/SKILL.md' load line in each generated brief.
+
+ship --mode no-mistakes : 1  (expected 1)
+ship --mode direct-PR : 1  (expected 1)
+ship --mode local-only : 1  (expected 1)
+scout          : 0  (expected 0)
+secondmate     : 0  (expected 0)
