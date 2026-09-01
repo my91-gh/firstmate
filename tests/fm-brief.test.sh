@@ -371,6 +371,36 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Ship briefs must instruct the crewmate to load the engineering-rigor skill
+# before writing non-trivial code; scout and secondmate briefs must not.
+test_ship_brief_loads_engineering_rigor() {
+  local home id brief mode scout charter
+  home="$TMP_ROOT/engineering-rigor-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-rigor-${mode}"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "ship brief was not scaffolded for mode $mode"
+    assert_grep "$ROOT/.agents/skills/engineering-rigor/SKILL.md" "$brief" \
+      "ship $mode brief did not load the engineering-rigor authoring skill"
+    assert_grep "Match your task to its playbook and follow the steps" "$brief" \
+      "ship $mode brief did not point at the task-type playbook"
+  done
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" rigor-scout some-proj --scout >/dev/null 2>&1
+  scout="$home/data/rigor-scout/brief.md"
+  assert_no_grep "engineering-rigor/SKILL.md" "$scout" \
+    "scout brief must not carry the ship-only engineering-rigor load instruction"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='rigor domain' \
+    "$ROOT/bin/fm-brief.sh" rigor-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/rigor-mate/brief.md"
+  assert_no_grep "engineering-rigor/SKILL.md" "$charter" \
+    "secondmate charter must not carry the ship-only engineering-rigor load instruction"
+  pass "fm-brief.sh: ship briefs load engineering-rigor; scout and secondmate do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -722,6 +752,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_brief_loads_engineering_rigor
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
