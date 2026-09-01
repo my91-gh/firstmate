@@ -141,6 +141,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/engineering-rigor/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -318,6 +322,10 @@
     },
     {
       "path": "docs/documentation-audiences.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/engineering-rigor-approach.md",
       "audience": "maintainer-architecture"
     },
     {
