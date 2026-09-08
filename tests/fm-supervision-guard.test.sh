@@ -60,6 +60,23 @@ trap 'guard_test_cleanup; exit 143' TERM
 ) || fail "sourcing the guard must define the supervisor-target discovery functions"
 pass "guard sources supervisor-target-lib: discovery functions are defined"
 
+# 0b. Backend resolution in the detached-host command: with no
+#     FM_SUPERVISOR_BACKEND/TARGET and no multiplexer env, the FM_SUPERVISOR_BACKEND
+#     baked into fm_supervision_guard_host_cmd must be exactly one valid token. A
+#     redundant `|| printf tmux` fallback once doubled discover_supervisor_backend's
+#     own 'tmux' default into 'tmuxtmux', which pane_is_busy rejects as unknown so
+#     the busy gate could no longer suppress a long turn.
+backend=$(
+  unset FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET FM_SUPERVISION_GUARD_HOST_BACKEND TMUX_PANE HERDR_ENV HERDR_PANE_ID
+  FM_ROOT_OVERRIDE="$ROOT" . "$GUARD"
+  cmd=$(fm_supervision_guard_host_cmd)
+  printf '%s' "$cmd" | sed -n 's/.*FM_SUPERVISOR_BACKEND=\([^ ]*\).*/\1/p'
+)
+case "$backend" in
+  tmux|herdr) pass "host command bakes a single valid backend token ('$backend')" ;;
+  *) fail "host command backend must be one valid token, got: '$backend'" ;;
+esac
+
 # Fresh home with a live fake-claude primary recorded in state/.lock.
 make_home() {
   local name=$1 dir pid

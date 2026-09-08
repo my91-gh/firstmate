@@ -338,7 +338,7 @@ fm_supervision_guard_host_backend() {
     herdr|tmux) printf '%s' "$FM_SUPERVISOR_BACKEND"; return 0 ;;
   esac
   local b
-  b=$(discover_supervisor_backend 2>/dev/null || true)
+  b=$(discover_supervisor_backend 2>/dev/null)
   case "$b" in herdr|tmux) printf '%s' "$b" ;; *) printf tmux ;; esac
 }
 
@@ -362,8 +362,8 @@ fm_supervision_guard_host_close() {
 fm_supervision_guard_host_cmd() {
   local entry target backend overrides=""
   entry=$(fm_supervision_guard_entry_cmd)
-  target="${FM_SUPERVISOR_TARGET:-$(discover_supervisor_target 2>/dev/null || true)}"
-  backend="${FM_SUPERVISOR_BACKEND:-$(discover_supervisor_backend 2>/dev/null || printf tmux)}"
+  target="${FM_SUPERVISOR_TARGET:-$(discover_supervisor_target 2>/dev/null)}"
+  backend="${FM_SUPERVISOR_BACKEND:-$(discover_supervisor_backend 2>/dev/null)}"
   # Propagate the home's own state/root overrides so the detached daemon monitors
   # exactly this home (a secondmate home or a test may set these explicitly).
   [ -n "${FM_STATE_OVERRIDE:-}" ] && overrides="$overrides FM_STATE_OVERRIDE=$(printf '%q' "$FM_STATE_OVERRIDE")"
@@ -395,7 +395,7 @@ fm_supervision_guard_launch_tmux() {
 # survived reaping where the harness-native background job did not.
 fm_supervision_guard_launch_herdr() {
   local target session out wsid pane cmd label
-  target="${FM_SUPERVISOR_TARGET:-$(discover_supervisor_target 2>/dev/null || true)}"
+  target="${FM_SUPERVISOR_TARGET:-$(discover_supervisor_target 2>/dev/null)}"
   session=${target%%:*}
   if [ -z "$session" ] || [ "$session" = "$target" ]; then
     log "cannot derive herdr session from captain target '$target'"; return 1
