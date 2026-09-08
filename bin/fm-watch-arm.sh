@@ -67,6 +67,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+
+# Out-of-band supervision liveness guard. Arming a watcher is the moment
+# supervision is (re)established, so this is where we ensure the home-scoped guard
+# that survives host low-memory reaping is alive too. It is idempotent (a no-op
+# when a live guard already runs) and best-effort, so it never blocks or fails an
+# arm. Skipped when this arm itself runs inside the guard's own host, so the guard
+# never re-establishes itself recursively.
+if [ "${FM_SUPERVISION_GUARD_ROLE:-}" != daemon ]; then
+  "$SCRIPT_DIR/fm-supervision-guard.sh" ensure >/dev/null 2>&1 || true
+fi
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.

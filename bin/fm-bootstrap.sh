@@ -1251,6 +1251,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # Supervision liveness guard: a local, home-scoped sweep that drops a
+  # recorded-but-dead guard host and re-establishes the out-of-band guard when
+  # work is in flight. This is what makes a guard reaped during an idle stretch
+  # come back at the next session start. Best-effort; never blocks bootstrap.
+  local_phase && "$SCRIPT_DIR/fm-supervision-guard.sh" reconcile >/dev/null 2>&1 || true
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync

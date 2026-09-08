@@ -16,6 +16,7 @@ The turn-end guard closes the remaining gap at the primary's own turn boundary.
 When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
+This guard and the pull-based warning are both in-band, so neither fires when the host low-memory guard reaps the supervision process during an idle window with no turn boundary to reach; the out-of-band [`supervision-guard.md`](supervision-guard.md) covers that idle-window gap.
 
 ## Guard predicates
 

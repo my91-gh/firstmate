@@ -127,6 +127,7 @@ state/               runtime records and signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .supervision-guard.lock .supervision-guard-terminal .supervision-guard-outage .supervision-guard-outage-since .supervision-guard-alarmed .supervision-guard.log   out-of-band supervision liveness guard singleton lock, detached-host record, durable outage marker, outage clock, alarm rate-limit stamp, and log; owned by bin/fm-supervision-guard.sh (docs/supervision-guard.md); never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -415,6 +416,7 @@ Guard warnings do not replace the contract.
 Queued wakes must be presented before other action and acknowledged only after handling, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
+Those guards are in-band; an out-of-band liveness guard (`bin/fm-supervision-guard.sh`, established automatically at arm, away-mode entry, and locked session start) is the backstop for a supervision process reaped during an idle window with no turn to fire, and it self-recovers or alarms without manual operation (docs/supervision-guard.md).
 
 ### Away-mode stub
 
