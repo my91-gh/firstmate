@@ -1,0 +1,20 @@
+firstmate out-of-band supervision liveness guard - end-to-end behavior
+target commit 2e74e98  |  base d7e70b0  |  2026-09-08T08:12:06Z
+bin/fm-supervision-guard.sh 'tick' verdicts against the two confirmed silent-outage incidents + busy gate
+
+== INCIDENT 2026-09-08  ordinary Stop-hook watcher reaped during idle window ==
+state: crewmate parked (work in flight), watcher beacon absent (reaped), outage sustained, pane idle
+verdict: alarm: ordinary supervision down (stale-beacon) 1001s; captain notified
+durable outage marker: written
+active alert dispatched -> channel/summary: osascript	supervision down (stale-beacon) 1001s - send any message to firstmate to resume; see /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.9fwm7vQqoI/ordinary/state/.supervision-guard-outage
+
+== INCIDENT 2026-08-12  away-mode daemon reaped while state/.afk present ==
+state: away flag (.afk) present, away daemon reaped, outage sustained
+verdict: recovered: away daemon relaunched after 1000s outage (stale-beacon)
+away daemon relaunched (self-recovery via fm-afk-launch start): yes
+outage clock cleared after recovery: yes
+
+== BUSY GATE  long legitimate turn under autoarm must NOT false-alarm ==
+state: beacon stale but captain pane BUSY (turn running; Stop hook re-arms at turn end)
+verdict: ok: watcher between turns; captain pane busy (turn running, Stop hook will re-arm)
+active alert suppressed (log empty): yes
