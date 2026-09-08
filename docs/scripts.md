@@ -79,6 +79,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervisor-inject.sh` | Enforce the shared busy, composer, and verified-submit boundary for one primary injection |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
+| `fm-supervision-guard.sh` | Out-of-band liveness guard hosted in a detached terminal that self-recovers or alarms when a supervision process is reaped during an idle window (docs/supervision-guard.md) |
+| `fm-wedge-alarm-lib.sh`  | Shared backend-independent active-alert channel resolution and dispatch for the away daemon and the supervision guard (docs/wedge-alarm.md) |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-nm-run-lib.sh`       | Shared branch-and-code-identity attribution for no-mistakes runs                    |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
