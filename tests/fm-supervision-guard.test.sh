@@ -52,6 +52,7 @@ trap 'guard_test_cleanup; exit 143' TERM
 #    ordinary autoarm model (which never exports FM_SUPERVISOR_TARGET) raises a
 #    false SUPERVISION DOWN. Assert the sourced functions exist, not the text.
 (
+  # shellcheck disable=SC1090
   FM_ROOT_OVERRIDE="$ROOT" . "$GUARD"
   command -v discover_supervisor_target >/dev/null 2>&1 \
     || { printf 'not ok - guard must define discover_supervisor_target\n' >&2; exit 1; }
@@ -68,6 +69,7 @@ pass "guard sources supervisor-target-lib: discovery functions are defined"
 #     the busy gate could no longer suppress a long turn.
 backend=$(
   unset FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET FM_SUPERVISION_GUARD_HOST_BACKEND TMUX_PANE HERDR_ENV HERDR_PANE_ID
+  # shellcheck disable=SC1090
   FM_ROOT_OVERRIDE="$ROOT" . "$GUARD"
   cmd=$(fm_supervision_guard_host_cmd)
   printf '%s' "$cmd" | sed -n 's/.*FM_SUPERVISOR_BACKEND=\([^ ]*\).*/\1/p'
