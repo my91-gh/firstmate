@@ -524,6 +524,10 @@ fm_afk_launch_start() {
   else
     rm -rf "$backup" || result=1
   fi
+  # Establish the out-of-band supervision liveness guard so a reaped away daemon
+  # is detected and relaunched even during an idle away stretch. Best-effort and
+  # idempotent; it never blocks or fails away-mode entry.
+  [ "$result" -eq 0 ] && [ -z "${FM_AFK_LAUNCH_ENTRY:-}" ] && "$FM_AFK_LAUNCH_DIR/fm-supervision-guard.sh" ensure >/dev/null 2>&1 || true
   return "$result"
 }
 
@@ -567,6 +571,8 @@ fm_afk_launch_start_native() {
   else
     rm -rf "$backup" || result=1
   fi
+  # Establish the out-of-band supervision liveness guard (see fm_afk_launch_start).
+  [ "$result" -eq 0 ] && [ -z "${FM_AFK_LAUNCH_ENTRY:-}" ] && "$FM_AFK_LAUNCH_DIR/fm-supervision-guard.sh" ensure >/dev/null 2>&1 || true
   return "$result"
 }
 

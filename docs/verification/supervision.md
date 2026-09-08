@@ -459,6 +459,28 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Supervision liveness guard
+
+`bin/fm-supervision-guard.sh` is the out-of-band backstop for a supervision process reaped by the host low-memory guard during an idle window, when no turn fires to run the in-band guards ([`../supervision-guard.md`](../supervision-guard.md)).
+It reproduces both confirmed silent-outage incidents as failing-then-fixed regression cases: the 2026-08-12 away-mode reap and the 2026-09-08 ordinary Stop-hook reap.
+
+Portable regression, run on 2026-09-08 with the pinned lint toolchain and no live harness:
+
+```sh
+tests/fm-supervision-guard.test.sh
+```
+
+Observed guarantees, home-scoped throughout:
+
+- A live primary with no work, and a healthy fresh-beacon watcher, are both left untouched with no alarm.
+- Under the ordinary auto-arm model, a down watcher with an affirmatively busy captain pane is treated as a running turn and suppressed, while a down watcher during an idle window that persists past the confirmation window raises the active alarm and writes the durable `state/.supervision-guard-outage` marker (the 2026-09-08 case).
+- Under away mode, a sustained outage relaunches the away daemon, and a failed relaunch alarms (the 2026-08-12 case).
+- The active alarm is rate-limited to once per re-alarm window while the durable marker persists.
+- The herdr host records the exact non-visible workspace and pane it created; the tmux host path runs where tmux is installed.
+
+The active-alert channel is forced to the recorder seam by `tests/wake-helpers.sh`, so no run posts a real desktop notification.
+The detached-host end-to-end topology (a real tmux session or herdr workspace) is exercised by the same suite only where that tool is installed; the herdr create path additionally has a stubbed-CLI unit check that runs everywhere.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

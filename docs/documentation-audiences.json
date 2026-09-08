@@ -67,6 +67,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/supervision-guard.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
       "source": "docs/turnend-guard.md",
       "target": "docs/verification/supervision.md"
     },
@@ -310,6 +314,10 @@
     },
     {
       "path": "docs/subagent-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/supervision-guard.md",
       "audience": "maintainer-architecture"
     },
     {
