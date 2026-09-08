@@ -75,6 +75,10 @@ LOG="${FM_SUPERVISION_GUARD_LOG:-$STATE/.supervision-guard.log}"
 # pane_is_busy for the busy gate. Source-safe; adds no state.
 # shellcheck source=bin/fm-supervisor-inject.sh
 . "$FM_SUPERVISION_GUARD_DIR/fm-supervisor-inject.sh"
+# discover_supervisor_target / discover_supervisor_backend for the busy gate and
+# host-backend selection. Source-safe; adds no state.
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_SUPERVISION_GUARD_DIR/fm-supervisor-target-lib.sh"
 
 # The guard writes its own operational log; the shared wedge-alarm library resolves
 # `log` at call time, so defining it before sourcing keeps alarm diagnostics in the

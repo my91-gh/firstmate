@@ -46,6 +46,20 @@ trap guard_test_cleanup EXIT
 trap 'guard_test_cleanup; exit 130' INT
 trap 'guard_test_cleanup; exit 143' TERM
 
+# 0. Sourced interface: the guard must define discover_supervisor_target and
+#    discover_supervisor_backend at load time. Without them the busy gate reads an
+#    empty target and always reports not-busy, so a long legitimate turn under the
+#    ordinary autoarm model (which never exports FM_SUPERVISOR_TARGET) raises a
+#    false SUPERVISION DOWN. Assert the sourced functions exist, not the text.
+(
+  FM_ROOT_OVERRIDE="$ROOT" . "$GUARD"
+  command -v discover_supervisor_target >/dev/null 2>&1 \
+    || { printf 'not ok - guard must define discover_supervisor_target\n' >&2; exit 1; }
+  command -v discover_supervisor_backend >/dev/null 2>&1 \
+    || { printf 'not ok - guard must define discover_supervisor_backend\n' >&2; exit 1; }
+) || fail "sourcing the guard must define the supervisor-target discovery functions"
+pass "guard sources supervisor-target-lib: discovery functions are defined"
+
 # Fresh home with a live fake-claude primary recorded in state/.lock.
 make_home() {
   local name=$1 dir pid
