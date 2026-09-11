@@ -11,7 +11,28 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# The background remote-job worker writes heartbeats and pid files into
+# remote-jobs. Signalling it and removing the tree in the same breath races
+# those writes, so rm can hit a directory another process just repopulated
+# ("Directory not empty"). Wait for the worker to actually exit before the
+# removal, exactly as the other worker-backed suites do.
+cleanup() {
+  local worker_pid i
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
+    if [ -n "$worker_pid" ]; then
+      kill "$worker_pid" 2>/dev/null || true
+      i=0
+      while [ "$i" -lt 500 ] && kill -0 "$worker_pid" 2>/dev/null; do
+        sleep 0.01
+        i=$((i + 1))
+      done
+    fi
+  fi
+  wait 2>/dev/null || true
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"

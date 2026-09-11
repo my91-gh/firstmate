@@ -34,17 +34,6 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Quota-guard arm seam (safety). bin/fm-bootstrap.sh arms bin/fm-quota-guard.sh
-# on every locked session start, and that arm starts a REAL detached background
-# process. Any suite that drives bootstrap or a session start would therefore
-# spawn one guard per fixture home and leak it: the fixture home is deleted at
-# teardown while the guard keeps polling, so a full suite run leaves behind one
-# immortal process per bootstrap invocation. Disable the arm for every suite
-# here, so it is impossible to forget - sourcing this library installs it. The
-# quota-guard suite re-enables it explicitly for the one case that needs a real
-# daemon.
-export FM_QUOTA_GUARD_NO_ARM=1
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
