@@ -1,0 +1,38 @@
+Evidence: removal of ios-simulator-ui-driving skill + inventory reference cleanup
+Target commit: e491177ad844e00c9a396c1d9076c11bef11df2e
+Base commit:   6efc0be4055b151533ef921c4d209e2d5374f985
+
+1. Skill directory fully removed (3 files):
+   $ ls .agents/skills/ios-simulator-ui-driving
+   ls: .agents/skills/ios-simulator-ui-driving: No such file or directory
+
+   git diff --stat:
+     .agents/skills/ios-simulator-ui-driving/SKILL.md                   | 118 ---
+     .agents/skills/ios-simulator-ui-driving/references/xcuitest-template.swift |  67 --
+     .agents/skills/ios-simulator-ui-driving/scripts/export-attachments.sh      |  88 --
+     docs/documentation-audiences.json                                  |   4 -
+     4 files changed, 277 deletions(-)
+
+2. No dangling references anywhere in the repo:
+   $ grep -rn "ios-simulator-ui-driving" --exclude-dir=.git .
+   (no output; exit 1 = no match)
+
+3. .claude/skills symlink is directory-level, needs no change:
+   $ ls -l .claude/skills
+   .claude/skills -> ../.agents/skills
+
+4. Inventory JSON stays valid, single agent-runtime entry removed, ordering intact
+   (removed object sat between harness-adapters and process-event-sources).
+
+5. Real consumer of the inventory passes (primary acceptance):
+   $ bin/fm-doc-audience-check.sh
+   fm-doc-audience-check: ok surfaces=72 local_links=261
+   EXIT: 0
+
+6. Targeted regression suite passes:
+   $ bash tests/fm-documentation-audiences.test.sh
+   ok - documentation inventory classifies every maintained prose surface exactly once
+   ok - classification, setup routing, and maintained-prose scope fail safely
+   ok - required documentation owner pointers cannot silently disappear
+   ok - local links resolve while dates, versions, commands, and incident prose remain semantically reviewed
+   EXIT: 0
