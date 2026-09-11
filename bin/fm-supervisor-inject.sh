@@ -2,7 +2,7 @@
 # fm-supervisor-inject.sh - verified one-shot injection into Firstmate's primary.
 #
 # This source-safe library is the single owner of the shared delivery boundary
-# used by the away-mode daemon and quota-reset nudges. It adds no harness screen
+# used by the away-mode daemon. It adds no harness screen
 # knowledge. Busy signatures remain owned by bin/fm-busy-lib.sh, composer proof
 # remains owned by the backend adapters, and typed operational inputs remain
 # owned by bin/fm-operational-input.sh.
@@ -11,18 +11,6 @@
 # types once only when the target exists, the primary is not busy, and the
 # composer is positively empty. It then retries Enter only through the backend
 # submit primitive. It returns nonzero for every unsafe or unconfirmed result.
-#
-# Executed form, used as a detached one-shot accelerator by the quota guard:
-#   FM_HOME=<home> FM_STATE_OVERRIDE=<home-state> \
-#   FM_SUPERVISOR_TARGET=<target> FM_SUPERVISOR_BACKEND=<tmux|herdr> \
-#   FM_SUPERVISOR_SESSION_PID=<pid> FM_SUPERVISOR_SESSION_IDENTITY=<identity> \
-#   fm-supervisor-inject.sh <kind> <body>
-#
-# The executed form has no target discovery or fallback. It also requires the
-# exact live session pid still recorded in this home's state/.lock and the same
-# process identity captured at binding time. The caller can therefore bind a
-# target only while it runs inside that home's lock-owning primary, and a stale,
-# reused, or replaced primary makes the later injection inert.
 # Bash 3.2 compatible.
 set -u
 
@@ -109,29 +97,3 @@ fm_supervisor_inject() {  # <kind> <body> <target> <backend> <retries> <sleep-se
   FM_SUPERVISOR_INJECT_REASON="submit unconfirmed after $retries retries ($verdict)"
   return 1
 }
-
-fm_supervisor_inject_main() {
-  local kind=${1-} body=${2-} state lock_pid current_identity
-  [ "$#" -eq 2 ] && [ -n "$kind" ] && [ -n "$body" ] || return 2
-  state=${FM_STATE_OVERRIDE:-${FM_HOME:?FM_HOME is required}/state}
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "${FM_SUPERVISOR_SESSION_PID:-}" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$lock_pid" = "$FM_SUPERVISOR_SESSION_PID" ] || return 1
-  kill -0 "$FM_SUPERVISOR_SESSION_PID" 2>/dev/null || return 1
-  current_identity=$(fm_pid_identity "$FM_SUPERVISOR_SESSION_PID" 2>/dev/null) || return 1
-  [ -n "${FM_SUPERVISOR_SESSION_IDENTITY:-}" ] \
-    && [ "$current_identity" = "$FM_SUPERVISOR_SESSION_IDENTITY" ] || return 1
-  [ -n "${FM_SUPERVISOR_TARGET:-}" ] && [ -n "${FM_SUPERVISOR_BACKEND:-}" ] || return 1
-  fm_supervisor_inject "$kind" "$body" \
-    "$FM_SUPERVISOR_TARGET" "$FM_SUPERVISOR_BACKEND" \
-    "${FM_INJECT_CONFIRM_RETRIES:-3}" "${FM_INJECT_CONFIRM_SLEEP:-0.5}"
-}
-
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$FM_SUPERVISOR_INJECT_DIR/fm-wake-lib.sh"
-  fm_supervisor_inject_main "$@"
-  exit $?
-fi

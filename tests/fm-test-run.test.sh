@@ -100,7 +100,6 @@ init_changed_fixture_repo() {
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
-    fm-quota-guard.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
@@ -164,7 +163,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add bin/fm-supervisor-inject.sh
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-daemon.test.sh" "shared injector selects daemon coverage"
-  assert_contains "$listed" "tests/fm-quota-guard.test.sh" "shared injector selects quota guard coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" "shared injector selects session-bootstrap coverage"
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "shared injector selects away-mode coverage"
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm injector-change
 
