@@ -165,10 +165,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/ios-simulator-ui-driving/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
