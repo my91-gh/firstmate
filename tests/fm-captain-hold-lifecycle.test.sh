@@ -103,7 +103,15 @@ configure_merged_github() {  # <home>
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
-  "pr view") printf '%s\n' 1111111111111111111111111111111111111111 ;;
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        ;;
+      *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+    esac
+    ;;
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "api graphql")
     printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
     ;;
@@ -113,7 +121,6 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac
 SH
@@ -1238,22 +1245,32 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
-  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
+  printf 'blocked [key=access]: waiting\ndone: report complete\nnote: cleanup complete\n' \
     > "$home/state/$id.status"
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
+  [ -z "$open" ] || fail "the shared fold retained a pre-terminal blocker"
   run_captain "$home" complete "$id" --none >/dev/null \
     || fail "terminal single-owner stale status decision blocked empty inventory completion"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "terminal single-owner stale status decision blocked inventory verification"
+  printf 'blocked [key=access]: reopened\nnote: more cleanup\n' >> "$home/state/$id.status"
+  if run_captain "$home" complete "$id" --none > "$home/reopened.out" 2> "$home/reopened.err"; then
+    fail "completion accepted a genuinely reopened post-terminal decision"
+  fi
+  if run_captain "$home" verify "$id" > "$home/reopened-verify.out" 2> "$home/reopened-verify.err"; then
+    fail "verification accepted a genuinely reopened post-terminal decision"
+  fi
+  printf 'resolved [key=access]: answered\nfailed: investigation ended\nnote: final cleanup\n' >> "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "resolved reopening blocked completion"
+  run_captain "$home" verify "$id" >/dev/null || fail "resolved reopening blocked verification"
   run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
     || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
 
   secondmate=sample-secondmate
   write_origin_meta "$home" "$secondmate" secondmate
-  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
+  printf 'blocked [key=route]: waiting\ndone: heartbeat complete\nnote: cleanup complete\n' \
     > "$home/state/$secondmate.status"
   if run_captain "$home" complete "$secondmate" --none \
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
@@ -3197,14 +3214,14 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
     || fail "could not hold the PR entrypoint fixture"
 
-  # Without the entrypoint guard, this run reaches gh-axi and returns success
-  # even though the task is still held for the captain.
+  # Without the entrypoint guard, this run reaches gh and returns success even
+  # though the task is still held for the captain.
   set +e
   run_pr_merge "$home" "$pr_id" "$pr" > "$home/pr.out" 2> "$home/pr.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a still-held task"
-  assert_no_grep 'pr merge 31 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 31 ' "$home/gh.log" \
     "the PR merge entrypoint reached the irreversible forge call for a held task"
   assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
     "the PR merge refusal did not name the held task"
@@ -3272,7 +3289,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted an unreadable captain-hold authority record"
   assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-pr.err" \
     "the PR merge refusal did not name its unreadable authority record"
-  assert_no_grep 'pr merge 43 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 43 ' "$home/gh.log" \
     "the PR merge entrypoint reached the forge without a readable authority record"
 
   # A home with no backlog at all records no captain calls, so nothing can be
@@ -3280,7 +3297,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   rm "$home/data/backlog.md"
   run_pr_merge "$home" "$id" "$pr" > "$home/absent-pr.out" 2> "$home/absent-pr.err" \
     || fail "the PR merge entrypoint refused a home carrying no backlog"
-  merge_count=$(grep -c 'pr merge 43 ' "$home/gh-axi.log" || true)
+  merge_count=$(grep -c 'pr merge 43 ' "$home/gh.log" || true)
   [ "$merge_count" -eq 1 ] || fail "the absent backlog did not permit exactly one PR merge"
   pass "the PR merge entrypoint separates an unreadable authority record from an absent one"
 }
@@ -3476,7 +3493,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
   # Without the pre-wait generation capture and locked comparison, the waiter
   # records and merges pull request 42 against the replacement task record.
   [ "$merge_rc" -ne 0 ] || fail "the PR merge accepted a replacement task incarnation"
-  assert_no_grep 'pr merge 42 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 42 ' "$home/gh.log" \
     "the PR merge reached the forge for a replacement task incarnation"
   assert_grep "changed incarnation while waiting to merge" "$home/reuse-merge.err" \
     "the PR merge did not identify the replacement task incarnation"
@@ -3666,7 +3683,7 @@ SH
     "PR cleanup was not refused by the merge's task control lock"
   [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
   assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
-  assert_grep 'pr merge 33 ' "$home/gh-axi.log" \
+  assert_grep 'pr merge 33 ' "$home/gh.log" \
     "the serialized PR merge did not reach the forge after cleanup was refused"
 
   local_home=$(make_home teardown-race-local-entrypoint)
@@ -3844,7 +3861,138 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+# A shown scalar field is a JSON-encoded bare string, and JSON::PP accepts one
+# only when allow_nonref is on. Recent releases default it on, so this case
+# forces the older default back off for every perl the command spawns - the same
+# rejection a host with JSON::PP 2.27202 produces - then drives both paths that
+# read a body back: holding a task for the captain, and the cleanup that retains
+# a captain-held row with its deliverable.
+test_hold_decodes_a_bare_scalar_body_without_the_nonref_default() {
+  local home shim id show probe scout
+  home=$(make_home nonref-default)
+  shim="$home/no-nonref-default"
+  mkdir -p "$shim"
+  cat > "$shim/FmNoNonrefDefault.pm" <<'PM'
+package FmNoNonrefDefault;
+require JSON::PP;
+my $new = \&JSON::PP::new;
+{
+  no warnings 'redefine';
+  *JSON::PP::new = sub { my $self = $new->(@_); $self->allow_nonref(0); $self };
+}
+1;
+PM
+
+  # Without this the case would pass on any decode path at all, including the
+  # one this regression exists to catch.
+  probe=$(printf '%s' '"probe"' | PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    perl -MJSON::PP -e 'local $/; eval { decode_json(<STDIN>) };
+      print $@ ? "rejects" : "accepts";')
+  [ "$probe" = rejects ] \
+    || fail "the simulated older default still accepted a bare scalar"
+
+  id=sample-nonref-body
+  tasks_in "$home" add "$id" "Work carrying a body" --kind ship --repo sample \
+    --body 'First line of the plan.' >/dev/null \
+    || fail "could not create the task carrying a body"
+  PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    run_captain "$home" hold "$id" --reason "captain go needed" >/dev/null \
+    || fail "a captain hold failed where allow_nonref is not on by default"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the held row disappeared"
+  assert_contains "$show" "hold_kind: captain" "the hold lost its captain kind"
+  assert_contains "$show" "Captain hold set:" "the hold lost its hold-set stamp"
+  assert_contains "$show" "First line of the plan." "the hold lost the original body"
+
+  # Cleanup reads the same body back to append the finished work's deliverable.
+  scout=sample-nonref-scout
+  mkdir -p "$home/data/$scout"
+  tasks_in "$home" add "$scout" "Investigate the sample body decode" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$scout"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Sample body decode\n\nOne captain choice remains.\n' \
+    > "$home/data/$scout/report.md"
+  run_captain "$home" hold "$scout" --reason "captain must choose" >/dev/null \
+    || fail "could not hold the investigation for the captain"
+  run_captain "$home" complete "$scout" "$scout" >/dev/null \
+    || fail "the completion gate failed with the origin as its own captain call"
+  PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    run_teardown "$home" "$scout" > "$home/nonref.out" 2> "$home/nonref.err" \
+    || fail "cleanup of a captain-held row failed where allow_nonref is not on by default: $(cat "$home/nonref.err")"
+  show=$(tasks_in "$home" show "$scout" --full) || fail "the retained row disappeared"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$scout/report.md" \
+    "cleanup lost the deliverable it could not decode a body to append to"
+  assert_contains "$show" "Captain hold set:" "cleanup lost the hold-set stamp"
+  pass "both body-decoding paths work without the allow_nonref default"
+}
+
+# Cleanup rewrites a captain-held row's body to append the finished work's
+# deliverable, so every byte of that body has to survive the decode. The
+# assertions below are on bytes, not characters: a decoder that prints a
+# character string to a stream with no :raw layer emits a codepoint at or below
+# U+00FF as one latin-1 byte, which is not valid UTF-8, and the comparison of
+# decoded strings would not notice.
+#
+# The two characters go in separate rows on purpose. A string that holds any
+# character above U+00FF is printed as UTF-8 whatever the layer, so mixing them
+# in one body hides the latin-1 case entirely.
+
+# Take one captain-held row carrying <body> all the way through cleanup, which
+# is the path that reads the body back to append the deliverable.
+retain_row_with_body() {  # <home> <id> <body>
+  local home=$1 id=$2 body=$3
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample body bytes" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the fixture for $id"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample body bytes\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  tasks_in "$home" update "$id" --body "$body" >/dev/null \
+    || fail "could not give $id a body carrying non-ASCII characters"
+  run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
+    || fail "could not hold $id for the captain"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "the completion gate failed for $id"
+  run_teardown "$home" "$id" > "$home/$id.out" 2> "$home/$id.err" \
+    || fail "cleanup of captain-held $id failed: $(cat "$home/$id.err")"
+}
+
+test_retained_body_keeps_its_utf8_bytes() {
+  local home accented wide narrow_id wide_id stored
+  home=$(make_home retain-utf8)
+  # Built from escapes so this file stays ASCII and the intended bytes are
+  # explicit: U+00E9 is the latin-1-representable case, U+2014 the wider one.
+  accented=$(printf 'caf\xc3\xa9')
+  wide=$(printf '\xe2\x80\x94')
+  stored="$home/data/backlog.md"
+
+  # A body whose characters are all at or below U+00FF.
+  narrow_id=sample-utf8-narrow
+  retain_row_with_body "$home" "$narrow_id" "Serve the $accented black, no sugar."
+  # data/backlog.md is the markdown backend's own persisted artifact, read here
+  # for its bytes because the shown field re-encodes them.
+  assert_grep "Deliverable of the finished work: report data/$narrow_id/report.md" "$stored" \
+    "cleanup did not rewrite the retained body, so nothing decoded it"
+  LC_ALL=C grep -qF "$accented" "$stored" \
+    || fail "the retained body lost the UTF-8 bytes of a character at or below U+00FF"
+  ! LC_ALL=C grep -q "$(printf '[\xe9]')" "$stored" \
+    || fail "the retained body holds a lone latin-1 byte, so it is no longer valid UTF-8"
+
+  # A body carrying a character above U+00FF keeps its bytes and stays quiet.
+  wide_id=sample-utf8-wide
+  retain_row_with_body "$home" "$wide_id" "Serve it $wide black, no sugar."
+  LC_ALL=C grep -qF "$wide" "$stored" \
+    || fail "the retained body lost the UTF-8 bytes of a character above U+00FF"
+  assert_no_grep "Wide character" "$home/$wide_id.err" \
+    "cleanup warned about a wide character instead of writing raw bytes"
+
+  pass "cleanup preserves every byte of a retained body's non-ASCII characters"
+}
+
 test_uninventoried_report_decision_refuses_completion
+test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
+test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work

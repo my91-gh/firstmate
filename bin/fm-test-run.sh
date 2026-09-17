@@ -116,6 +116,10 @@
 # live-capability (a live-harness guard governed by fm_live_gate, which records
 # unavailable tools and explicit policy skips; see tests/lib.sh), or none.
 #
+# Every selected script runs isolated from the host's global and system Git
+# configuration, including one that sources no test helper of its own;
+# tests/git-config-helpers.sh owns that contract and its limits.
+#
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
@@ -137,6 +141,10 @@
 # that names it is selected as that SCRIPT, because the reference is per-script
 # evidence. Consumer bin/ scripts still resolve through the curated map, so
 # recorded family-level coupling still expands to the whole family.
+# tests/lib.sh, tests/fixtures.sh, tests/*-helpers.sh and tests/*-fixture.sh are
+# shared files that map to the suites naming them; a fixture under
+# tests/fixtures/<dir>/ is mapped by that directory instead. Curated family arms
+# above those also name individual tests/ files explicitly.
 set -eu
 
 now_ms() {
@@ -274,9 +282,11 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-harness-precedence.test.sh|\
+    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-calm-claude-mod.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -304,7 +314,7 @@ family_for_basename() {
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
+    fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
       printf '%s\n' real-herdr-gated
@@ -333,19 +343,23 @@ family_for_basename() {
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
-    fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
+    fm-composer-codex-idle-live-e2e.test.sh|\
+    fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
+    fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
-    fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
+    fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
+    fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
+    fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -360,13 +374,14 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -382,6 +397,7 @@ family_for_basename() {
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
+    fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
@@ -491,7 +507,7 @@ tests/fm-composer-lib.test.sh 4798
 tests/fm-crew-state.test.sh 11557
 tests/fm-ensure-agents-md.test.sh 901
 tests/fm-grok-harness.test.sh 6563
-tests/fm-herdr-lab.test.sh 6936
+tests/fm-herdr-lab.test.sh 9800
 tests/fm-lint.test.sh 164262
 tests/fm-pi-primary-types.test.sh 8624
 tests/fm-pr-merge.test.sh 111145
@@ -646,6 +662,8 @@ list_portable_serial() {
 # balance rather than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
+tests/fm-agy-harness.test.sh 11000
+tests/fm-agy-signals-live-e2e.test.sh 23
 tests/fm-afk-contract.test.sh 3000
 tests/fm-afk-inject-e2e.test.sh 35792
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
@@ -682,6 +700,7 @@ tests/fm-control.test.sh 54301
 tests/fm-cursor-harness.test.sh 30103
 tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 54947
+tests/fm-dispatch-resolve.test.sh 1800
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
@@ -696,6 +715,7 @@ tests/fm-guard-stale-banner.test.sh 32981
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 20
 tests/fm-harness-adapter-references.test.sh 55
 tests/fm-harness-liveness-drift-live-e2e.test.sh 21
+tests/fm-herdr-attached-viewer-live-e2e.test.sh 19000
 tests/fm-herdr-session-cleanup.test.sh 6704
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
@@ -1221,12 +1241,14 @@ select_family() {
   [ "$found" -eq 1 ] || die "no tests mapped to family '$want'"
 }
 
-families_for_test_reference() {
-  local needle=$1 s
+families_for_test_reference() {  # <needle>...
+  local s needle
   local found=0
+  local -a needles=()
+  for needle in "$@"; do needles+=(-e "$needle"); done
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    if grep -Fq "$needle" "$s"; then
+    if grep -Fq "${needles[@]}" "$s"; then
       family_for_basename "$(basename "$s")"
       found=1
     fi
@@ -1303,11 +1325,20 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+    bin/fm-test-run.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
       # runner executes every pure-contract-unit script, so a change to it is
       # only proven by running them: its own contract test passing says the
       # runner's logic is right, not that the suite it drives still runs.
+      printf '%s\n' pure-contract-unit
+      # Only this script wraps each suite in run_script_bounded's fixture Git
+      # isolation, and only a standalone-family script proves it.
+      printf '%s\n' "__script__:fm-test-fixtures.test.sh"
+      ;;
+    bin/fm-test-isolation-proof.sh)
+      # Same reason as the runner above: the proof drives every
+      # pure-contract-unit script. It runs each candidate directly, never
+      # through run_script_bounded, so it cannot regress fixture Git isolation.
       printf '%s\n' pure-contract-unit
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh|tests/herdr-client-pair-fixture.sh)
@@ -1367,21 +1398,35 @@ families_for_changed_path() {
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
-    bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
+    bin/fm-session-start.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-bootstrap.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-brief.test.sh"
       ;;
     bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-dispatch-resolve.sh)
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-env-lib.sh)
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
+      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
@@ -1410,6 +1455,16 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
       printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
+    .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
+      # The Claude Code Calm mod and the sprite core it shares with the Pi Calm
+      # extension: the portable Node checks, the Pi suites that draw the shared
+      # sprite, the Pi typecheck, and the Claude-dependent guards.
+      printf '%s\n' __script__:fm-calm-claude-mod.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
@@ -1478,7 +1533,7 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|bin/fm-contributions.sh|bin/fm-contributions.jq|\
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -1521,8 +1576,10 @@ families_for_changed_path() {
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
-    tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh)
-      families_for_test_reference "$(basename "$path")" \
+    tests/git-config-helpers.sh)
+      # The reference scan is not transitive, so match the two helpers that
+      # source this one as well: most suites inherit it only through them.
+      families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*)
@@ -1536,6 +1593,15 @@ families_for_changed_path() {
         families_for_test_reference "fixtures/$fixture_ref" \
           || printf '%s\n' "__unmapped__:$path"
       fi
+      ;;
+    tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
+      # Shared top-level test files, selected by the suites that name them.
+      # Must stay below the tests/fixtures/*/* arm: a case glob's * spans /, so
+      # tests/*-fixture.sh would otherwise swallow a nested
+      # tests/fixtures/<dir>/<name>-fixture.sh and scan for its basename
+      # instead of the fixture directory its readers actually name.
+      families_for_test_reference "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule
@@ -2275,6 +2341,12 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
+  # Declaring the variables local first keeps the helper's export scoped to this
+  # call and its child script, so the runner's own environment is left as the
+  # caller had it.
+  local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+  # shellcheck source=tests/git-config-helpers.sh
+  . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
   : "$id"
   set +e
