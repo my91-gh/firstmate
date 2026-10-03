@@ -1,0 +1,102 @@
+=== CLEAN PATH ===
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh check
+upstream-remote: added
+origin: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/origin.git
+upstream: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/upstream.git
+fork-of: kunchenguid/firstmate
+state: behind
+upstream-tip: 38f0cb462f8c93b7afc8142d403d48b8e3fd426d
+upstream-new-commits: 1
+upstream-commit: 38f0cb4 upstream: add feature
+branch: sync/upstream-38f0cb462f8c
+branch-on-origin: no
+[exit 0]
+
+$ fm-fork-sync.sh merge
+origin: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/origin.git
+upstream: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/upstream.git
+fork-of: kunchenguid/firstmate
+worktree: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+merge: clean
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh push-main /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+fm-fork-sync: the test suite has not passed on 982900ae1fe645f8df91c00faa9b44e5747e0afe; run: fm-fork-sync.sh test /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+[exit 1]
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh test /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+(suite ran on 982900a)
+tests: passed
+[exit 0]
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh push-main /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+pushed-main: 982900ae1fe645f8df91c00faa9b44e5747e0afe
+[exit 0]
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh cleanup /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+cleaned: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.39Yfqg/wt
+[exit 0]
+
+$ git -C origin.git log --oneline -3 main
+982900a Merge upstream kunchenguid/main into fork main
+11cedd1 fork: captain's own change
+38f0cb4 upstream: add feature
+
+--- local copy before fm-update.sh: 11cedd1 fork: captain's own change
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac FM_HOME=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac/bin/fm-update.sh
+firstmate: updated 11cedd1..982900a
+no watches registered
+reread-firstmate: no
+restart-secondmates: none
+nudge-secondmates: none
+[exit 0]
+--- local copy after: 982900a Merge upstream kunchenguid/main into fork main; files: fork-only.txt shared.txt upstream-feature.txt 
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh check
+origin: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/origin.git
+upstream: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/upstream.git
+fork-of: kunchenguid/firstmate
+state: current
+[exit 0]
+
+=== CONFLICT PATH ===
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh check
+origin: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/origin.git
+upstream: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/upstream.git
+fork-of: kunchenguid/firstmate
+state: behind
+upstream-tip: e8c54c82c312260297491431de3f31353aa3a3d9
+upstream-new-commits: 1
+upstream-commit: e8c54c8 upstream: edit shared
+branch: sync/upstream-e8c54c82c312
+branch-on-origin: no
+[exit 0]
+
+$ fm-fork-sync.sh merge
+origin: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/origin.git
+upstream: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/upstream.git
+fork-of: kunchenguid/firstmate
+worktree: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+merge: conflict
+conflict: shared.txt
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh test /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+(suite ran on 802d7c7)
+tests: passed
+[exit 0]
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh push-main /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+fm-fork-sync: only an unmodified clean merge may be pushed to main; a resolved conflict ships as a reviewed PR (push-branch)
+[exit 1]
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh push-branch /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+pushed-branch: sync/upstream-e8c54c82c312
+[exit 0]
+--- origin main unchanged: d682b6a fork: edit shared
+--- origin branches: main sync/upstream-e8c54c82c312 
+
+$ env FM_ROOT_OVERRIDE=/var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/mac /Users/bobmorane/.no-mistakes/worktrees/cd17e37d71cf/01M40XY3K41P0MB2H8JAJDV54B/bin/fm-fork-sync.sh cleanup /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+cleaned: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T/tmp.ywTAuZuE2V/tmp/fm-fork-sync.AOaSKE/wt
+[exit 0]
