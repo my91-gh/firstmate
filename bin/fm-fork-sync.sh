@@ -15,7 +15,10 @@
 #       caller skips straight to the local update. Also prints the upstream
 #       tip, the count and subjects of the arriving commits, the deterministic
 #       conflict-PR branch name for this upstream tip, and whether that branch
-#       is already on origin (a conflict PR may already be waiting).
+#       is already on origin (a conflict PR may already be waiting). When it is,
+#       `branch-state: up-to-date` means the branch still contains both the
+#       current origin main and the upstream tip, so a PR can be opened from it
+#       as is; `branch-state: outdated` means the fork's main moved since.
 #   merge
 #       Refuse when the primary checkout has uncommitted tracked changes. Cut
 #       a disposable worktree from origin/main and merge upstream/main into it
@@ -23,7 +26,8 @@
 #       `merge: clean` (a single merge commit, recorded as the only commit
 #       push-main will publish) or `merge: conflict` plus one `conflict: <path>`
 #       line per unmerged file; the conflicted worktree is left in the merge
-#       state for the caller to resolve, commit, and test.
+#       state for the caller to resolve, commit, and test. A merge that fails
+#       without conflicts removes its worktree before failing.
 #   test <worktree>
 #       Run the repository's test suite on the merge result (default
 #       `bin/fm-test-run.sh --all` in the worktree, overridable with
@@ -105,17 +109,25 @@ cmd_check() {
     echo "state: current"
     return 0
   fi
-  local br
+  local br sha
   br=$(sync_branch)
   echo "state: behind"
   echo "upstream-tip: $(git_root rev-parse "refs/remotes/upstream/$BRANCH")"
   echo "upstream-new-commits: $(git_root rev-list --count "refs/remotes/origin/$BRANCH..refs/remotes/upstream/$BRANCH")"
   git_root log --format='upstream-commit: %h %s' -n 30 "refs/remotes/origin/$BRANCH..refs/remotes/upstream/$BRANCH"
   echo "branch: $br"
-  if [ -n "$(git_root ls-remote --heads origin "$br")" ]; then
-    echo "branch-on-origin: yes"
-  else
+  sha=$(git_root ls-remote origin "refs/heads/$br" | cut -f1)
+  if [ -z "$sha" ]; then
     echo "branch-on-origin: no"
+    return 0
+  fi
+  echo "branch-on-origin: yes"
+  git_root fetch -q origin "refs/heads/$br" || die "fetch of $br failed"
+  if git_root merge-base --is-ancestor "refs/remotes/origin/$BRANCH" "$sha" &&
+    git_root merge-base --is-ancestor "refs/remotes/upstream/$BRANCH" "$sha"; then
+    echo "branch-state: up-to-date"
+  else
+    echo "branch-state: outdated"
   fi
 }
 
@@ -130,6 +142,11 @@ wt_gitdir() {
   git -C "$wt" rev-parse --absolute-git-dir
 }
 
+remove_wt() {
+  git_root worktree remove --force "$1"
+  rmdir "$(dirname "$1")" 2>/dev/null || true
+}
+
 cmd_merge() {
   verify_remotes
   fetch_both
@@ -139,19 +156,22 @@ cmd_merge() {
   fi
   [ -z "$(git_root status --porcelain --untracked-files=no)" ] ||
     die "the primary checkout has uncommitted changes; commit or discard them first"
-  local dir wt gd conflicts
+  local dir wt gd conflicts merge_out
   dir=$(mktemp -d "${TMPDIR:-/tmp}/$WT_PREFIX.XXXXXX")
   wt="$dir/wt"
   git_root worktree add -q --detach "$wt" "refs/remotes/origin/$BRANCH" || { rmdir "$dir"; die "cannot create the merge worktree"; }
   gd=$(git -C "$wt" rev-parse --absolute-git-dir)
   echo "worktree: $wt"
-  if git -C "$wt" merge -q --no-ff -m "$MERGE_MSG" "refs/remotes/upstream/$BRANCH" >/dev/null 2>&1; then
+  if merge_out=$(git -C "$wt" merge -q --no-ff -m "$MERGE_MSG" "refs/remotes/upstream/$BRANCH" 2>&1); then
     printf 'clean %s\n' "$(git -C "$wt" rev-parse HEAD)" > "$gd/$WT_PREFIX-outcome"
     echo "merge: clean"
     return 0
   fi
   conflicts=$(git -C "$wt" diff --name-only --diff-filter=U)
-  [ -n "$conflicts" ] && [ -e "$gd/MERGE_HEAD" ] || die "merge failed without conflicts; inspect $wt"
+  if [ -z "$conflicts" ] || [ ! -e "$gd/MERGE_HEAD" ]; then
+    remove_wt "$wt"
+    die "merge failed without conflicts and its worktree was removed: $merge_out"
+  fi
   echo conflict > "$gd/$WT_PREFIX-outcome"
   echo "merge: conflict"
   printf '%s\n' "$conflicts" | sed 's/^/conflict: /'
@@ -226,8 +246,7 @@ cmd_cleanup() {
   if [ "${2:-}" != --abandon ] && { [ -e "$gd/MERGE_HEAD" ] || [ -n "$(git -C "$wt" status --porcelain)" ]; }; then
     die "the worktree holds an unfinished merge or changes; pass --abandon to discard it"
   fi
-  git_root worktree remove --force "$wt"
-  rmdir "$(dirname "$wt")" 2>/dev/null || true
+  remove_wt "$wt"
   echo "cleaned: $wt"
 }
 

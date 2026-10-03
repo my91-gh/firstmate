@@ -28,7 +28,11 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
    On `state: behind`, it lists the arriving upstream commits.
    When it prints `branch-on-origin: yes`, a conflict PR for this exact upstream tip may already be waiting: look it up with `gh-axi pr list --head <branch>`.
    An open one means report it and stop; a merged one means rerun the check.
-   A closed one, or no pull request at all, means the branch is stale: delete it with `git push origin --delete <branch>`, then continue.
+   A closed one means the branch is stale: delete it with `git push origin --delete <branch>`, then continue.
+   No pull request at all means an earlier run pushed a resolution but did not open its pull request; never delete that branch.
+   On `branch-state: up-to-date`, open the missing pull request from it as step 4 describes, then report its full URL and stop.
+   Its body says an earlier run pushed the branch, lists the hand-resolved files shown by `git show --cc origin/<branch>`, and states that the test result is unknown.
+   On `branch-state: outdated`, the fork's `main` moved since that branch was pushed: report the branch to the captain and stop.
    Never force-push over it; `push-branch` refuses a stale branch that the new merge does not fast-forward.
 
 2. **Merge in an isolated copy.**
@@ -46,8 +50,8 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
    ```
    `test` runs the repository's full suite on the merge result and can take a long time; run it in the background and poll.
    `push-main` refuses unless the suite passed on that exact commit and the push is a plain fast-forward.
-   A failing suite stops the sync: report which tests failed and leave the fork untouched.
-   Then go to step 5.
+   A failing suite stops the sync: report which tests failed, leave the fork untouched, and remove the worktree with `bin/fm-fork-sync.sh cleanup <worktree>`.
+   Otherwise go to step 5.
 
 4. **Conflicts: resolve, test, open a pull request, stop.**
    Resolve each conflicted file in the worktree, keeping the fork's own changes and upstream's intent.

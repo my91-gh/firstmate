@@ -20,6 +20,9 @@
 #     pushed, whether they exist before the suite or appear while it runs.
 #   - A stale PR branch from an earlier sync of the same upstream tip is
 #     reported, never overwritten, and the push succeeds once it is deleted.
+#   - A pushed PR branch is reported `up-to-date` while it still contains the
+#     fork's main and the upstream tip, and `outdated` once the fork moves.
+#   - A merge that fails without conflicts leaves no worktree behind.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -312,6 +315,50 @@ test_stale_pr_branch() {
   pass "T7 a stale PR branch is reported, never forced, and replaced once deleted"
 }
 
+test_pushed_branch_state() {
+  local w out wt br sha
+  w=$(new_world branchstate)
+  commit_to "$w" upstream shared.txt upstream-side
+  commit_to "$w" origin shared.txt fork-side
+
+  out=$(sync_run "$w" merge) || fail "merge failed: $out"
+  wt=$(wt_of "$out")
+  printf 'resolved\n' > "$wt/shared.txt"
+  git -C "$wt" commit -qam resolved
+  out=$(sync_run "$w" push-branch "$wt") || fail "push-branch failed: $out"
+  br=$(printf '%s\n' "$out" | sed -n 's/^pushed-branch: //p')
+  sha=$(git -C "$w/origin.git" rev-parse "$br")
+  sync_run "$w" cleanup "$wt" >/dev/null || fail "cleanup failed"
+
+  out=$(sync_run "$w" check) || fail "check failed: $out"
+  assert_contains "$out" "branch-on-origin: yes" "the pushed branch is seen"
+  assert_contains "$out" "branch-state: up-to-date" "a branch on the current main and upstream tip is reusable"
+
+  commit_to "$w" origin c.txt fork-moved
+  out=$(sync_run "$w" check) || fail "check failed: $out"
+  assert_contains "$out" "branch: $br" "the branch name still follows the upstream tip"
+  assert_contains "$out" "branch-state: outdated" "a branch behind the moved main is outdated"
+  assert_equals "$sha" "$(git -C "$w/origin.git" rev-parse "$br")" "check never touches the branch"
+  pass "T8 a pushed PR branch is reported up-to-date or outdated against the fork's main"
+}
+
+test_failed_merge_leaves_no_worktree() {
+  local w out old_origin
+  w=$(new_world mergefail)
+  commit_to "$w" upstream b.txt up-b
+  old_origin=$(git -C "$w/origin.git" rev-parse main)
+  printf '#!/bin/sh\necho hook-refused >&2\nexit 1\n' > "$w/primary/.git/hooks/pre-merge-commit"
+  chmod +x "$w/primary/.git/hooks/pre-merge-commit"
+
+  if out=$(sync_run "$w" merge); then fail "a merge refused by a hook succeeded"; fi
+  assert_contains "$out" "merge failed without conflicts" "the failure is reported"
+  assert_contains "$out" "hook-refused" "git's own reason is shown"
+  [ -z "$(ls -A "$w/tmp")" ] || fail "the failed merge left a worktree behind"
+  assert_equals 1 "$(git -C "$w/primary" worktree list --porcelain | grep -c '^worktree ')" "no worktree stays registered"
+  [ "$(git -C "$w/origin.git" rev-parse main)" = "$old_origin" ] || fail "origin main moved"
+  pass "T9 a merge that fails without conflicts removes its worktree"
+}
+
 test_wrong_remotes_refused
 test_missing_upstream_added_and_current
 test_clean_merge_flow
@@ -319,5 +366,7 @@ test_conflict_flow
 test_refusals
 test_uncommitted_worktree_never_stamped
 test_stale_pr_branch
+test_pushed_branch_state
+test_failed_merge_leaves_no_worktree
 
 echo "# all fm-fork-sync tests passed"
