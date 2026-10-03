@@ -443,6 +443,11 @@ Dirty, uniquely diverged, offline, and off-default targets are reported and left
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
+`/updatemyfirstmate` runs before that flow for a captain whose `origin` is a fork of the original repository.
+It merges upstream's `main` into the fork's `main` in a disposable worktree, never in the primary checkout and never by rebase or force-push.
+A clean merge reaches the fork only as a fast-forward after the test suite passed on that exact commit, while a hand-resolved conflict can only travel as a pull request that waits for the captain's merge approval.
+The [`/updatemyfirstmate` skill](../.agents/skills/updatemyfirstmate/SKILL.md) owns the procedure and `bin/fm-fork-sync.sh` owns the mechanics and refusals.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
