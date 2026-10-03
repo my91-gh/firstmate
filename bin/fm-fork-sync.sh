@@ -28,6 +28,12 @@
 #       line per unmerged file; the conflicted worktree is left in the merge
 #       state for the caller to resolve, commit, and test. A merge that fails
 #       without conflicts removes its worktree before failing.
+#   commit <worktree>
+#       Finish a resolved conflict merge with a plain `git commit --no-edit`,
+#       hooks included (never --no-verify). Refuses while conflicts remain
+#       unresolved. When a git hook refuses the commit, it prints the hook's
+#       exact output, exits non-zero, and leaves the worktree in the merge
+#       state; the caller reports that message to the captain and stops.
 #   test <worktree>
 #       Run the repository's test suite on the merge result (default
 #       `bin/fm-test-run.sh --all` in the worktree, overridable with
@@ -194,6 +200,19 @@ require_committed_merge() {
   git -C "$wt" merge-base --is-ancestor "refs/remotes/origin/$BRANCH" HEAD || die "HEAD lacks origin/$BRANCH; fetch moved, redo the merge"
 }
 
+cmd_commit() {
+  local wt=${1:?usage: fm-fork-sync.sh commit <worktree>} gd out
+  gd=$(wt_gitdir "$wt")
+  [ -e "$gd/MERGE_HEAD" ] || die "no merge in progress in $wt"
+  [ -z "$(git -C "$wt" diff --name-only --diff-filter=U)" ] ||
+    die "unresolved conflicts remain; resolve and git add them first"
+  if ! out=$(git -C "$wt" commit --no-edit 2>&1); then
+    printf '%s\n' "$out" >&2
+    die "git refused the merge commit (see its output above); the worktree is left in the merge state; report this to the captain and never bypass hooks"
+  fi
+  echo "committed: $(git -C "$wt" rev-parse HEAD)"
+}
+
 cmd_test() {
   local wt=${1:?usage: fm-fork-sync.sh test <worktree>} gd head
   gd=$(wt_gitdir "$wt")
@@ -253,10 +272,11 @@ cmd_cleanup() {
 case "${1:-}" in
   check) cmd_check ;;
   merge) cmd_merge ;;
+  commit) shift; cmd_commit "$@" ;;
   test) shift; cmd_test "$@" ;;
   push-main) shift; cmd_push_main "$@" ;;
   push-branch) shift; cmd_push_branch "$@" ;;
   cleanup) shift; cmd_cleanup "$@" ;;
   -h|--help|help) sed -n '2,/^set -eu/p' "$0" | sed -e '/^set -eu/d' -e 's/^# \{0,1\}//' ;;
-  *) echo "usage: fm-fork-sync.sh check|merge|test|push-main|push-branch|cleanup [args] (see --help)" >&2; exit 2 ;;
+  *) echo "usage: fm-fork-sync.sh check|merge|commit|test|push-main|push-branch|cleanup [args] (see --help)" >&2; exit 2 ;;
 esac

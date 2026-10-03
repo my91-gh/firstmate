@@ -61,7 +61,14 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
 4. **Conflicts: resolve, test, open a pull request, stop.**
    Resolve each conflicted file in the worktree, keeping the fork's own changes and upstream's intent.
    Read both sides and `git log` of the file before choosing; never take one side wholesale to make the conflict disappear.
-   Then `git add` the files, `git commit --no-edit` in the worktree, run `bin/fm-fork-sync.sh test <worktree>`, and push the branch:
+   Then `git add` the files and finish the merge commit:
+   ```sh
+   bin/fm-fork-sync.sh commit <worktree>
+   ```
+   When a local git hook (for example a pre-commit secret check) refuses the commit, `commit` exits non-zero and prints the hook's exact message.
+   Then stop, leave the worktree as it is, and report that exact message to the captain.
+   Never bypass a hook, with `--no-verify` or any other means, without the captain's word.
+   After the commit, run `bin/fm-fork-sync.sh test <worktree>` and push the branch:
    ```sh
    bin/fm-fork-sync.sh push-branch <worktree>
    ```

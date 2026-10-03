@@ -23,6 +23,8 @@
 #   - A pushed PR branch is reported `up-to-date` while it still contains the
 #     fork's main and the upstream tip, and `outdated` once the fork moves.
 #   - A merge that fails without conflicts leaves no worktree behind.
+#   - `commit` finishes a resolved merge through the git hooks; a refusing hook
+#     is surfaced verbatim, creates no commit, and leaves the merge state.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -359,6 +361,42 @@ test_failed_merge_leaves_no_worktree() {
   pass "T9 a merge that fails without conflicts removes its worktree"
 }
 
+test_commit_respects_hooks() {
+  local w out wt before
+  w=$(new_world hooks)
+  commit_to "$w" upstream shared.txt upstream-side
+  commit_to "$w" origin shared.txt fork-side
+  mkdir -p "$w/hooks"
+  printf '#!/bin/sh\necho "secret-check: GEMINI_API_KEY found" >&2\nexit 1\n' > "$w/hooks/pre-commit"
+  chmod +x "$w/hooks/pre-commit"
+  git -C "$w/primary" config core.hooksPath "$w/hooks"
+
+  out=$(sync_run "$w" merge) || fail "merge failed: $out"
+  wt=$(wt_of "$out")
+  before=$(git -C "$wt" rev-parse HEAD)
+  if out=$(sync_run "$w" commit "$wt"); then fail "commit ran with unresolved conflicts"; fi
+  assert_contains "$out" "unresolved conflicts" "unresolved conflicts are refused"
+
+  printf 'resolved\n' > "$wt/shared.txt"
+  git -C "$wt" add shared.txt
+  if out=$(sync_run "$w" commit "$wt"); then fail "commit succeeded past a refusing hook"; fi
+  assert_contains "$out" "secret-check: GEMINI_API_KEY found" "the hook's exact message is shown"
+  assert_contains "$out" "left in the merge state" "the refusal says the worktree is kept"
+  assert_equals "$before" "$(git -C "$wt" rev-parse HEAD)" "no commit was created"
+  [ -e "$(git -C "$wt" rev-parse --absolute-git-dir)/MERGE_HEAD" ] || fail "the merge state was lost"
+  assert_equals "M  shared.txt" "$(git -C "$wt" status --porcelain)" "the staged resolution is untouched"
+
+  printf '#!/bin/sh\nexit 0\n' > "$w/hooks/pre-commit"
+  out=$(sync_run "$w" commit "$wt") || fail "commit with a passing hook failed: $out"
+  assert_contains "$out" "committed: $(git -C "$wt" rev-parse HEAD)" "reports the merge commit"
+  assert_equals 3 "$(git -C "$wt" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" "a two-parent merge commit"
+  assert_equals "$MSG" "$(git -C "$wt" log -1 --format=%s)" "the merge message is kept"
+  if out=$(sync_run "$w" commit "$wt"); then fail "commit ran with no merge in progress"; fi
+  assert_contains "$out" "no merge in progress" "a finished merge is refused"
+  sync_run "$w" cleanup "$wt" >/dev/null || fail "cleanup failed"
+  pass "T10 commit goes through the hooks and stops on a refusal with the hook's message"
+}
+
 test_wrong_remotes_refused
 test_missing_upstream_added_and_current
 test_clean_merge_flow
@@ -368,5 +406,6 @@ test_uncommitted_worktree_never_stamped
 test_stale_pr_branch
 test_pushed_branch_state
 test_failed_merge_leaves_no_worktree
+test_commit_respects_hooks
 
 echo "# all fm-fork-sync tests passed"
