@@ -27,7 +27,9 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
    On `state: current`, go to step 6.
    On `state: behind`, it lists the arriving upstream commits.
    When it prints `branch-on-origin: yes`, a conflict PR for this exact upstream tip may already be waiting: look it up with `gh-axi pr list --head <branch>`.
-   An open one means report it and stop; a merged one means rerun the check; a closed one means continue.
+   An open one means report it and stop; a merged one means rerun the check.
+   A closed one, or no pull request at all, means the branch is stale: delete it with `git push origin --delete <branch>`, then continue.
+   Never force-push over it; `push-branch` refuses a stale branch that the new merge does not fast-forward.
 
 2. **Merge in an isolated copy.**
    ```sh
@@ -56,8 +58,10 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
    ```
    Open the pull request on the fork with `gh-axi pr create --repo <fork> --base main --head <branch> --title ... --body-file ...`.
    The body lists every conflicted file, how each was resolved and why, and the test result (say plainly if tests failed).
+   The body also tells the captain to merge it with "Create a merge commit", never squash or rebase.
+   A squash or rebase drops upstream's history from the fork's `main`, so every later sync would hit the same conflicts again.
    Resolutions are new content, so the captain's merge approval is required; never merge it.
-   Report the full pull request URL and stop.
+   Report the full pull request URL, remind the captain to merge it with "Create a merge commit", and stop.
    After the captain merges it, a rerun of `/updatemyfirstmate` finds the fork current and continues at step 6.
 
 5. **Clean up.**

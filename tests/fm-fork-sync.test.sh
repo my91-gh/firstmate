@@ -16,6 +16,10 @@
 #     deterministic PR branch, with main untouched.
 #   - A dirty primary checkout, a moved origin main, and a directory that is not
 #     one of the script's worktrees are all refused without forcing anything.
+#   - Uncommitted edits in the merge worktree can never be stamped as tested or
+#     pushed, whether they exist before the suite or appear while it runs.
+#   - A stale PR branch from an earlier sync of the same upstream tip is
+#     reported, never overwritten, and the push succeeds once it is deleted.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -238,10 +242,82 @@ test_refusals() {
   pass "T5 dirty checkout, foreign directory, and a moved origin main are refused"
 }
 
+test_uncommitted_worktree_never_stamped() {
+  local w out wt old_origin
+  w=$(new_world dirtywt)
+  commit_to "$w" upstream b.txt up-b
+  old_origin=$(git -C "$w/origin.git" rev-parse main)
+  out=$(sync_run "$w" merge) || fail "merge failed: $out"
+  wt=$(wt_of "$out")
+
+  printf 'u0\n' > "$wt/a.txt.fixed"
+  printf 'edited\n' > "$wt/a.txt"
+  if out=$(FM_FORK_SYNC_TEST_CMD='grep -q edited a.txt' sync_run "$w" test "$wt"); then
+    fail "test stamped a worktree with uncommitted edits"
+  fi
+  assert_contains "$out" "uncommitted changes" "dirty worktree refused before the suite"
+  assert_not_contains "$out" "tests: passed" "the suite did not run on uncommitted content"
+  if out=$(sync_run "$w" push-main "$wt"); then fail "push-main pushed with uncommitted edits"; fi
+  [ "$(git -C "$w/origin.git" rev-parse main)" = "$old_origin" ] || fail "origin main moved"
+
+  git -C "$wt" checkout -q -- a.txt
+  rm "$wt/a.txt.fixed"
+  FM_FORK_SYNC_TEST_CMD=true sync_run "$w" test "$wt" >/dev/null || fail "clean worktree was not stamped"
+  printf 'edited\n' > "$wt/a.txt"
+  if out=$(sync_run "$w" push-main "$wt"); then fail "push-main pushed edits made after the stamp"; fi
+  assert_contains "$out" "uncommitted changes" "edits after the stamp are refused"
+  [ "$(git -C "$w/origin.git" rev-parse main)" = "$old_origin" ] || fail "origin main moved"
+  git -C "$wt" checkout -q -- a.txt
+
+  if out=$(FM_FORK_SYNC_TEST_CMD='printf "x\n" > a.txt' sync_run "$w" test "$wt"); then
+    fail "a suite that dirtied the worktree was stamped"
+  fi
+  assert_contains "$out" "uncommitted changes" "edits made during the suite are refused"
+  git -C "$wt" checkout -q -- a.txt
+  if out=$(sync_run "$w" push-main "$wt"); then fail "push-main used a stale stamp"; fi
+  assert_contains "$out" "has not passed" "a refused test run clears the old stamp"
+  [ "$(git -C "$w/origin.git" rev-parse main)" = "$old_origin" ] || fail "origin main moved"
+  sync_run "$w" cleanup "$wt" --abandon >/dev/null || fail "cleanup failed"
+  pass "T6 uncommitted worktree edits are never stamped or pushed"
+}
+
+test_stale_pr_branch() {
+  local w out wt br stale
+  w=$(new_world stale)
+  commit_to "$w" upstream shared.txt upstream-side
+  commit_to "$w" origin shared.txt fork-side
+
+  out=$(sync_run "$w" merge) || fail "merge failed: $out"
+  wt=$(wt_of "$out")
+  printf 'first\n' > "$wt/shared.txt"
+  git -C "$wt" commit -qam resolved
+  out=$(sync_run "$w" push-branch "$wt") || fail "push-branch failed: $out"
+  br=$(printf '%s\n' "$out" | sed -n 's/^pushed-branch: //p')
+  stale=$(git -C "$w/origin.git" rev-parse "$br")
+  sync_run "$w" cleanup "$wt" >/dev/null || fail "cleanup failed"
+
+  out=$(sync_run "$w" merge) || fail "second merge failed: $out"
+  wt=$(wt_of "$out")
+  printf 'second\n' > "$wt/shared.txt"
+  git -C "$wt" commit -qam resolved-again
+  if out=$(sync_run "$w" push-branch "$wt"); then fail "push-branch overwrote a stale branch"; fi
+  assert_contains "$out" "already on origin" "the stale branch is named as the cause"
+  assert_contains "$out" "git push origin --delete $br" "the refusal says how to proceed"
+  assert_equals "$stale" "$(git -C "$w/origin.git" rev-parse "$br")" "the stale branch is untouched"
+
+  git -C "$w/primary" push -q origin --delete "$br"
+  out=$(sync_run "$w" push-branch "$wt") || fail "push-branch after deleting the stale branch failed: $out"
+  assert_equals "$(git -C "$wt" rev-parse HEAD)" "$(git -C "$w/origin.git" rev-parse "$br")" "the new resolution is on origin"
+  sync_run "$w" cleanup "$wt" >/dev/null || fail "cleanup failed"
+  pass "T7 a stale PR branch is reported, never forced, and replaced once deleted"
+}
+
 test_wrong_remotes_refused
 test_missing_upstream_added_and_current
 test_clean_merge_flow
 test_conflict_flow
 test_refusals
+test_uncommitted_worktree_never_stamped
+test_stale_pr_branch
 
 echo "# all fm-fork-sync tests passed"

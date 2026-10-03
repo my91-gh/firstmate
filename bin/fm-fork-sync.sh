@@ -28,6 +28,8 @@
 #       Run the repository's test suite on the merge result (default
 #       `bin/fm-test-run.sh --all` in the worktree, overridable with
 #       FM_FORK_SYNC_TEST_CMD) and, on success, stamp that exact HEAD as tested.
+#       Refuses a worktree with uncommitted or untracked changes, before the
+#       suite runs and again before stamping, so only committed content passes.
 #   push-main <worktree>
 #       Fast-forward origin main to the clean merge commit. Refuses unless the
 #       merge was clean and still unmodified, the suite passed on that exact
@@ -36,6 +38,8 @@
 #   push-branch <worktree>
 #       Push the committed merge to origin as the conflict-PR branch printed by
 #       `check` (never forced); the caller then opens the PR against main.
+#       When a stale branch from an earlier sync of the same upstream tip is
+#       already on origin and does not fast-forward, it refuses and says so.
 #   cleanup <worktree> [--abandon]
 #       Remove the disposable worktree. A worktree still holding an unfinished
 #       merge or uncommitted changes needs --abandon.
@@ -153,21 +157,33 @@ cmd_merge() {
   printf '%s\n' "$conflicts" | sed 's/^/conflict: /'
 }
 
-# Die unless the merge in $1 is committed and contains both branch tips.
+# Die unless the worktree $1 has no uncommitted or untracked changes.
+require_clean_tree() {
+  [ -z "$(git -C "$1" status --porcelain)" ] ||
+    die "the worktree has uncommitted changes; commit them so HEAD is what gets tested and pushed"
+}
+
+# Die unless the merge in $1 is committed, matches HEAD exactly, and contains
+# both branch tips.
 require_committed_merge() {
   local wt=$1 gd=$2
   [ ! -e "$gd/MERGE_HEAD" ] || die "the merge is not committed yet"
   [ -z "$(git -C "$wt" diff --name-only --diff-filter=U)" ] || die "unresolved conflicts remain"
+  require_clean_tree "$wt"
   git -C "$wt" merge-base --is-ancestor "refs/remotes/upstream/$BRANCH" HEAD || die "HEAD lacks upstream/$BRANCH"
   git -C "$wt" merge-base --is-ancestor "refs/remotes/origin/$BRANCH" HEAD || die "HEAD lacks origin/$BRANCH; fetch moved, redo the merge"
 }
 
 cmd_test() {
-  local wt=${1:?usage: fm-fork-sync.sh test <worktree>} gd
+  local wt=${1:?usage: fm-fork-sync.sh test <worktree>} gd head
   gd=$(wt_gitdir "$wt")
+  rm -f "$gd/$WT_PREFIX-tested"
   require_committed_merge "$wt" "$gd"
+  head=$(git -C "$wt" rev-parse HEAD)
   if (cd "$wt" && eval "${FM_FORK_SYNC_TEST_CMD:-bin/fm-test-run.sh --all}"); then
-    git -C "$wt" rev-parse HEAD > "$gd/$WT_PREFIX-tested"
+    [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || die "HEAD moved while the suite ran; rerun test"
+    require_clean_tree "$wt"
+    echo "$head" > "$gd/$WT_PREFIX-tested"
     echo "tests: passed"
   else
     rm -f "$gd/$WT_PREFIX-tested"
@@ -196,7 +212,11 @@ cmd_push_branch() {
   gd=$(wt_gitdir "$wt")
   require_committed_merge "$wt" "$gd"
   br=$(sync_branch)
-  git -C "$wt" push -q origin "HEAD:refs/heads/$br" || die "push of $br was refused; nothing was forced"
+  if ! git -C "$wt" push -q origin "HEAD:refs/heads/$br"; then
+    [ -z "$(git -C "$wt" ls-remote --heads origin "refs/heads/$br")" ] ||
+      die "$br is already on origin from an earlier sync and this merge does not fast-forward it; if its PR is closed, delete it (git push origin --delete $br) and rerun push-branch; nothing was forced"
+    die "push of $br was refused; nothing was forced"
+  fi
   echo "pushed-branch: $br"
 }
 
