@@ -26,14 +26,19 @@ Never merge in the primary checkout, never rebase or force-push the fork's `main
    A refusal (origin is not a fork, `upstream` points elsewhere, GitHub unreachable) is the final answer: report it and stop.
    On `state: current`, go to step 6.
    On `state: behind`, it lists the arriving upstream commits.
-   When it prints `branch-on-origin: yes`, a conflict PR for this exact upstream tip may already be waiting: look it up with `gh-axi pr list --head <branch>`.
+   When it prints `branch-on-origin: yes`, a conflict PR for this exact upstream tip may already exist.
+   Look it up on the fork in every state, where `<fork>` is the owner/name of the `origin:` URL that `check` prints:
+   ```sh
+   gh-axi pr list --repo <fork> --state all --head <branch>
+   ```
    An open one means report it and stop; a merged one means rerun the check.
-   A closed one means the branch is stale: delete it with `git push origin --delete <branch>`, then continue.
-   No pull request at all means an earlier run pushed a resolution but did not open its pull request; never delete that branch.
+   A closed one means the captain rejected that resolution: report the pull request and the branch to the captain and stop.
+   Never delete that branch and never reopen or recreate its pull request without the captain's word.
+   No pull request in any state means an earlier run pushed a resolution but did not open its pull request; never delete that branch.
    On `branch-state: up-to-date`, open the missing pull request from it as step 4 describes, then report its full URL and stop.
    Its body says an earlier run pushed the branch, lists the hand-resolved files shown by `git show --cc origin/<branch>`, and states that the test result is unknown.
    On `branch-state: outdated`, the fork's `main` moved since that branch was pushed: report the branch to the captain and stop.
-   Never force-push over it; `push-branch` refuses a stale branch that the new merge does not fast-forward.
+   Never force-push over it; `push-branch` refuses a branch already on origin that the new merge does not fast-forward.
 
 2. **Merge in an isolated copy.**
    ```sh

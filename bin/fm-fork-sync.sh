@@ -234,7 +234,7 @@ cmd_push_branch() {
   br=$(sync_branch)
   if ! git -C "$wt" push -q origin "HEAD:refs/heads/$br"; then
     [ -z "$(git -C "$wt" ls-remote --heads origin "refs/heads/$br")" ] ||
-      die "$br is already on origin from an earlier sync and this merge does not fast-forward it; if its PR is closed, delete it (git push origin --delete $br) and rerun push-branch; nothing was forced"
+      die "$br is already on origin from an earlier sync and this merge does not fast-forward it; nothing was forced; ask the captain before deleting it (git push origin --delete $br), then rerun push-branch"
     die "push of $br was refused; nothing was forced"
   fi
   echo "pushed-branch: $br"
