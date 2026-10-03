@@ -1,0 +1,49 @@
+End-to-end run of bin/fm-fork-sync.sh (target 634b22c) against a temporary clone of the real fork
+my91-gh/firstmate with the real upstream kunchenguid/firstmate (tip 1f3e7696), on the captain's Mac
+with the captain's global hooks (core.hooksPath=~/.git-hooks). Nothing was pushed.
+
+$ fm-fork-sync.sh check
+upstream-remote: added
+origin: https://github.com/my91-gh/firstmate.git
+upstream: https://github.com/kunchenguid/firstmate.git
+fork-of: kunchenguid/firstmate
+state: behind
+upstream-tip: 1f3e769616fdf9f31f85f4c3e6a9f71606634238
+upstream-new-commits: 210
+upstream-commit: 1f3e7696 fix(pi): hide duplicate assistant finals from hidden processing retries (#5863)
+... (30 commit lines listed)
+branch: sync/upstream-1f3e769616fd
+branch-on-origin: no
+
+$ fm-fork-sync.sh merge
+worktree: $TMPDIR/fm-fork-sync.UEl0Uk/wt
+merge: conflict
+conflict: AGENTS.md
+
+$ fm-fork-sync.sh commit <wt>   # AGENTS.md still conflicted
+fm-fork-sync: unresolved conflicts remain; resolve and git add them first
+exit=1
+
+(demo-only resolution: git checkout --theirs AGENTS.md && git add AGENTS.md)
+
+$ fm-fork-sync.sh commit <wt>   # conflicts resolved, captain's global pre-commit hook active
++    env GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_API_KEY= "$GEMINI_BIN" -y hello
+ERROR: Possible secret or credential found in staged changes.
+  Review the diff above and use environment variables instead.
+fm-fork-sync: git refused the merge commit (see its output above); the worktree is left in the merge state; report this to the captain and never bypass hooks
+exit=1
+HEAD unchanged: yes
+MERGE_HEAD present: yes
+staged files: 405
+
+$ fm-fork-sync.sh push-branch <wt>  # must refuse the uncommitted merge
+fm-fork-sync: the merge is not committed yet
+exit=1
+
+$ fm-fork-sync.sh cleanup <wt>       # without --abandon
+fm-fork-sync: the worktree holds an unfinished merge or changes; pass --abandon to discard it
+exit=1
+
+$ fm-fork-sync.sh cleanup <wt> --abandon
+cleaned: /var/folders/lq/nz7ls77n4ys4tcy2cf3jqvj80000gn/T//fm-fork-sync.UEl0Uk/wt
+exit=0

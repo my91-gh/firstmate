@@ -1,0 +1,48 @@
+## Live check against the real fork (read-only on GitHub)
+$ git clone https://github.com/my91-gh/firstmate.git primary && cd primary
+$ bin/fm-fork-sync.sh check
+upstream-remote: added
+origin: https://github.com/my91-gh/firstmate.git
+upstream: https://github.com/kunchenguid/firstmate.git
+fork-of: kunchenguid/firstmate
+state: behind
+upstream-tip: 1f3e769616fdf9f31f85f4c3e6a9f71606634238
+upstream-new-commits: 210
+upstream-commit: 1f3e7696 fix(pi): hide duplicate assistant finals from hidden processing retries (#5863)
+upstream-commit: e31bc6e6 fix(pi): restore watcher continuity across successor gaps and make extension log opt-in (#5489)
+upstream-commit: d719ef3d fix(bin): retry ShellCheck roots that hit the memory ceiling without --external-sources (#6443)
+upstream-commit: 87fa81b8 fix: prevent Pi trust prompts in seeded secondmate homes (#6387)
+upstream-commit: f50e9cdb fix(bin): recognize titled Claude top rules and preserve grey slash commands (#5963)
+upstream-commit: 65e2aa44 fix: reduce remote-job polling process churn (#6363)
+upstream-commit: 241d4617 fix(bin): restore downtime on supervision-host hand-back when the successor already closed (#6355)
+upstream-commit: 8690c411 fix: reclaim orphaned watcher arms on the next park (#6335)
+upstream-commit: 6af83310 fix(bin): preserve hold reasons and reject invalid completion inventories (#6331)
+upstream-commit: 349e189f test: preserve Pi calm transcript captures with Pi 1.0 (#6338)
+upstream-commit: 8f756bbc fix(bin): recognize clone roots across path spelling differences (#6306)
+upstream-commit: b5d90612 fix(bin): document accepted contribution verdict actors (#6307)
+upstream-commit: f5930603 fix(bin): exclude a remote mate's own parent channel from self-home status scans (#5263)
+upstream-commit: 589ccec8 fix(bin): load backend sibling libraries when sourced under zsh (#6221)
+upstream-commit: 549e07f3 fix: reduce remote-job and supervision polling churn (#6255)
+upstream-commit: aedb7bbf fix(bin): close Gerrit-landed backlog items with the change URL as a note (#6140)
+upstream-commit: fd325b1b feat(bin): add opt-in config/wait-no-turns so a waiting worker spends no turns (#4859)
+upstream-commit: 23e55847 fix(bin): keep the steering doorbell short under deep homes (#6240)
+upstream-commit: 65c75b0d fix(bin): let a stale record on a reassigned slot retire records-only (#6213)
+upstream-commit: bd744684 fix(bin): run no repository hook when core.hooksPath is empty (#6216)
+upstream-commit: eb77f02b ci: rebalance portable test groups and enforce a packing budget (#6192)
+upstream-commit: c35b9a69 fix: reduce supervision exit latency and stabilize host tests (#6179)
+upstream-commit: 12e90e14 fix: inherit supervision host opt-out across secondmates (#6154)
+upstream-commit: b3d41332 fix: confirm Lavish board replies before worker handoff (#6169)
+upstream-commit: e2668de0 fix: restore portable CI behavior across Pi rendering and remote provisioning (#6162)
+upstream-commit: a774c448 fix(bin): stop provider-table lookup from writing broken-pipe errors to stderr (#6001)
+upstream-commit: 1f2c9548 fix(bin): measure pending-reply grace from turn completion, not delivery (#6126)
+upstream-commit: 5bddfc44 fix(bin): create the state dir on a fresh primary before the session-start scope check (#6125)
+upstream-commit: 0a2cdf95 feat: enable supervision host by default for Claude primaries (#6124)
+upstream-commit: 260c4f08 fix(bin): converge every open owner onto a known terminal contribution (#6112)
+branch: sync/upstream-1f3e769616fd
+branch-on-origin: no
+(exit 0)
+$ git remote -v
+origin	https://github.com/my91-gh/firstmate.git (fetch)
+origin	https://github.com/my91-gh/firstmate.git (push)
+upstream	https://github.com/kunchenguid/firstmate.git (fetch)
+upstream	https://github.com/kunchenguid/firstmate.git (push)

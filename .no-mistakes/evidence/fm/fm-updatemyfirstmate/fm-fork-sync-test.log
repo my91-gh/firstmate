@@ -1,0 +1,11 @@
+ok - T1 wrong remotes are refused
+ok - T2 missing upstream remote added; already-current fork is left alone
+ok - T3 clean merge: isolated, tested, fast-forwarded to origin main
+ok - T4 conflict: listed, resolution cannot reach main, ships as a PR branch
+ok - T5 dirty checkout, foreign directory, and a moved origin main are refused
+ok - T6 uncommitted worktree edits are never stamped or pushed
+ok - T7 a stale PR branch is reported, never forced, and replaced once deleted
+ok - T8 a pushed PR branch is reported up-to-date or outdated against the fork's main
+ok - T9 a merge that fails without conflicts removes its worktree
+ok - T10 commit goes through the hooks and stops on a refusal with the hook's message
+# all fm-fork-sync tests passed

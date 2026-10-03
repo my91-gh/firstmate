@@ -1,0 +1,20 @@
+## Full flow on local copies of the real fork (origin.git) and real upstream (upstream.git); gh is stubbed to report the fork parent
+$ bin/fm-fork-sync.sh check
+upstream-remote: added
+origin: /tmp/fmfs-live.d4Lh/origin.git
+upstream: /tmp/fmfs-live.d4Lh/upstream.git
+fork-of: kunchenguid/firstmate
+state: behind
+upstream-tip: 1f3e769616fdf9f31f85f4c3e6a9f71606634238
+upstream-new-commits: 210
+branch: sync/upstream-1f3e769616fd
+branch-on-origin: no
+(exit 0)
+$ bin/fm-fork-sync.sh merge
+origin: /tmp/fmfs-live.d4Lh/origin.git
+upstream: /tmp/fmfs-live.d4Lh/upstream.git
+fork-of: kunchenguid/firstmate
+worktree: /tmp/fmfs-live.d4Lh/tmp/fm-fork-sync.oQhvTB/wt
+merge: conflict
+conflict: AGENTS.md
+(exit 0)
