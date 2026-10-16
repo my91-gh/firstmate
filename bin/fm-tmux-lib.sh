@@ -41,10 +41,15 @@
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
+# The sibling directory is derived without forking dirname, because a backend
+# probe can re-source this adapter inside a subshell on every watcher cycle.
+_FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_TMUX_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_TMUX_LIB_DIR=.
 # shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+. "${_FM_TMUX_LIB_DIR:-/}/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+. "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
+unset _FM_TMUX_LIB_DIR
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -97,10 +102,14 @@ fm_tmux_composer_caps() {
 #     row between two stale rules stays unknown.
 #   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
 #     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+# It answers Command Code the same way, from its anchored `command-code`
+# foreground process name and its own verified busy footer: its composer is a
+# bare `❯` row between the same two rules, and its placeholder needs the
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# Prints "<agent><TAB>idle" or "<agent><TAB>working" for agent pi or
+# commandcode; exits 1 when the pane is neither.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm found=0 status agent=pi
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -109,6 +118,7 @@ fm_tmux_composer_identity() {  # <target>
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          command-code) found=1; agent=commandcode ;;
         esac
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
@@ -122,10 +132,10 @@ EOF
     esac
   fi
   [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  status=$(fm_pane_busy_state "$target" "$agent")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$agent" ;;
+    idle) printf '%s\tidle' "$agent" ;;
     *) return 1 ;;
   esac
 }
@@ -135,8 +145,9 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor), so the common read never pays
-# for the process probe.
+# it (a pi separator pair under the cursor) or the cursor-anchored read is
+# `unknown` (the Command Code check below), so an `unknown` read pays one
+# process probe and a definite read never does.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
@@ -145,7 +156,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity='probe-absent'
     fi
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
@@ -161,6 +172,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # harness is untouched.
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
+  # Command Code parks its terminal cursor below its footer too, drawing its
+  # own reverse-video cursor cell in the composer (verified live, Command Code
+  # 1.74.1), so it takes the same cursorless reclassification, gated on its own
+  # process identity and read with that identity.
+  if [ "$verdict" = unknown ] && identity=$(fm_tmux_composer_identity "$target") \
+     && [ "${identity%%$'\t'*}" = commandcode ]; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
 }
@@ -245,6 +265,11 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
+    # The first Enter can open a picker. A later Enter would confirm it.
+    if fm_composer_blocking_dialog_noted >/dev/null; then
+      printf 'unknown'
+      return 0
+    fi
     case "$state" in
       pending|pending-unproven) ;;
       unknown)
@@ -279,13 +304,19 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  # A failed literal send replays tmux's stderr (for example "command too
+  # long") so the caller can log why nothing was typed.
+  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    printf 'send-failed'
+    return 0
+  fi
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
