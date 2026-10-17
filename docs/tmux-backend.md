@@ -10,7 +10,7 @@ The universal harness and toolchain requirements are in [`configuration.md`](con
 
 tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
-An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
+Explicit tmux selection via `config/backend` or `--backend tmux` overrides runtime auto-detection.
 
 No provisioning is required before the first task.
 
@@ -62,7 +62,7 @@ The same scoping covers multi-process launchers without a special case, so the P
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `comp` remain ambiguous.
-AGY is anchored to the exact `agy` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
+AGY, Devin, and Command Code are anchored to the exact `agy`, `devin`, and `command-code` identities for the same reason, so unrelated names containing any of those fragments remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
@@ -72,6 +72,8 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 
 Agent liveness and composer safety are separate checks.
 The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
+Since OpenCode 1.18.0 its left bar also draws the working directory and branch right-aligned inside the rows above the Build footer, and the classifier recognises that cwd:branch furniture structurally so an idle pane keeps a proven `empty` verdict.
+OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor is re-read cursorlessly because Cursor parks its terminal cursor below its footer.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
@@ -80,7 +82,7 @@ A bare shell prompt is `unknown`, so away-mode escalation is never injected into
 
 Busy state is not read from rendered text on this backend.
 A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
-The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
+The isolated rendered-tail busy fallbacks that remain are harness-scoped, so one adapter's output can never classify another's task.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
