@@ -766,11 +766,6 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
 
-# Approach
-Before writing non-trivial code, read and follow \`$FM_ROOT/.agents/skills/engineering-rigor/SKILL.md\`.
-It carries firstmate's authoring rigor (the engineering principles) and an ordered playbook for your task type (feature, refactor, perf; a bug fix defers to \`diagnostic-reasoning\`).
-Match your task to its playbook and follow the steps; cite a principle only where it actually changed a choice.
-
 # Rules
 $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
