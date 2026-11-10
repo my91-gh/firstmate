@@ -524,6 +524,10 @@ fm_backlog_pr_is_gerrit_change() {  # <url>
   ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
 }
 
+# A `--pr-open <url>` flag (this library's own, not tasks-axi's) closes the row
+# with the pull request recorded as a note that it is still open, never as the
+# delivered `--pr` link that tasks-axi renders as merged: bin/fm-teardown.sh
+# passes it when it could not prove the merge.
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2 arg previous_arg=''
   local -a done_args=()
@@ -532,6 +536,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
     if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
       done_args[${#done_args[@]}-1]=--note
       done_args+=("Gerrit change $arg")
+    elif [ "$previous_arg" = --pr-open ]; then
+      done_args[${#done_args[@]}-1]=--note
+      done_args+=("PR still open: $arg")
     else
       done_args+=("$arg")
     fi
@@ -582,6 +589,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
           deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
         fi
         ;;
+      --pr-open) deliverable="${deliverable:+$deliverable; }PR still open: $arg" ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
     previous_arg=$arg
@@ -978,7 +986,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     2)
       case "${args[0]}" in
         --note) [ "${args[1]}" = "local%20main" ] ;;
-        --pr)
+        --pr|--pr-open)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
             && case "$arg_value" in https://*) true ;; *) false ;; esac \

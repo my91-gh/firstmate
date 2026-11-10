@@ -802,7 +802,7 @@ test_teardown_refuses_an_open_pull_request() {
     "open-pr: the refusal did not name the open pull request"
   assert_grep 'fm-pr-merge.sh' "$case_dir/stderr" \
     "open-pr: the refusal did not offer to merge first"
-  assert_grep -- '--pr-still-open' "$case_dir/stderr" \
+  assert_grep 'pr-still-open' "$case_dir/stderr" \
     "open-pr: the refusal did not offer the explicit flag"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
     || fail "open-pr: the refused teardown moved the backlog row to $(backlog_row_state "$case_dir")"
@@ -841,7 +841,7 @@ test_teardown_pr_still_open_flag_closes_the_row_without_merged_wording() {
 
   out=$(run_teardown "$case_dir" --pr-still-open 2>&1) \
     || fail "open-pr-flag: --pr-still-open should let the cleanup continue: $out"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "open-pr-flag: the row was not closed: $(backlog_row_state "$case_dir")"
   ! grep -q 'merged' "$case_dir/data/backlog.md" \
     || fail "open-pr-flag: the row claims a merge while the pull request is open: $(cat "$case_dir/data/backlog.md")"
@@ -861,7 +861,7 @@ test_teardown_force_with_an_open_pull_request_never_records_merged() {
 
   out=$(run_teardown "$case_dir" --force 2>&1) \
     || fail "open-pr-force: --force should keep discarding work as before: $out"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "open-pr-force: the row was not closed: $(backlog_row_state "$case_dir")"
   ! grep -q 'merged' "$case_dir/data/backlog.md" \
     || fail "open-pr-force: --force recorded a merge for an open pull request: $(cat "$case_dir/data/backlog.md")"
