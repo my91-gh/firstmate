@@ -99,7 +99,8 @@
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
 # on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
-# review tool. bin/fm-spawn.sh reads that line and
+# review tool, and a no-mistakes brief appends " validation-start=worker"
+# (bin/fm-dod-lib.sh owns its meaning). bin/fm-spawn.sh reads that line and
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.

@@ -856,6 +856,31 @@ test_prose_base_branch_line_is_ignored() {
   pass "a Base branch line in the captain's intent neither blocks nor redirects a spawn"
 }
 
+# The spawn copies the brief contract's validation-start= token into the task
+# record, so bin/fm-dod-lib.sh reads a done the way the worker's instructions
+# define it; a brief without the token records nothing and keeps the old reading.
+test_spawn_records_the_contract_validation_start() {
+  local rec id out status line
+  for line in 'mode=no-mistakes validation-start=worker' 'mode=no-mistakes'; do
+    id="pool-validation-start-$(printf '%s' "$line" | tr -c 'a-z0-9' '-' | sed 's/-*$//')"
+    rec=$(make_case "$id" "$id")
+    read_case_record "$rec"
+    printf '\n# Definition of done\nDelivery contract: %s\nShip branch: fm/%s\n' "$line" "$id" >> "$HOME_DIR/data/$id/brief.md"
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "a no-mistakes spawn with contract '$line' should launch"$'\n'"$out"
+    case "$line" in
+      *validation-start=worker)
+        assert_grep 'validation_start=worker' "$HOME_DIR/state/$id.meta" \
+          "the spawn did not record validation_start=worker" ;;
+      *)
+        assert_no_grep 'validation_start=' "$HOME_DIR/state/$id.meta" \
+          "a contract without the token recorded validation_start=" ;;
+    esac
+  done
+  pass "a ship spawn records the contract's validation-start= token as validation_start="
+}
+
 # A named base is validated against the project's registered forge for scouts
 # too, so a scout that promotion could never ship is refused at spawn.
 test_scout_base_branch_refused_on_gerrit_forge() {
@@ -881,6 +906,7 @@ test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch
 test_base_branch_must_agree_with_the_brief
 test_prose_base_branch_line_is_ignored
+test_spawn_records_the_contract_validation_start
 test_scout_base_branch_refused_on_gerrit_forge
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch

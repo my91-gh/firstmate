@@ -2455,7 +2455,9 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
-test_no_mistakes_prevalidation_done_stays_done() {
+# A task launched with the older contract has no validation_start= record, so
+# its handoff done still reads done.
+test_legacy_no_mistakes_handoff_done_stays_done() {
   reset_fakes
   local d out
   d=$(new_case preval-done)
@@ -2471,9 +2473,32 @@ test_no_mistakes_prevalidation_done_stays_done() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
-  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
-  pass "no-mistakes pre-validation done: stays current-state done"
+  assert_contains "$out" "state: done" "legacy no-mistakes handoff done: remains done"
+  assert_not_contains "$out" "state: blocked" "legacy handoff done: must not be the named-head gate"
+  pass "legacy no-mistakes handoff done: stays current-state done"
+}
+
+# A task whose worker starts /no-mistakes itself has one done, the PR report,
+# so a done without a pull request reads blocked with that reason.
+test_worker_started_validation_done_without_pr_is_blocked() {
+  reset_fakes
+  local d out
+  d=$(new_case selfstart-done)
+  make_repo_on_branch "$d/wt" fm/selfstart
+  git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selfstart.meta" \
+    "window=fm:fm-selfstart" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "validation_start=worker" "harness=claude"
+  printf 'done: implementation complete\n' > "$d/state/selfstart.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selfstart
+  out=$(run_crew_state "$d" selfstart)
+  assert_contains "$out" "state: blocked" "a done without a pull request must read blocked"
+  assert_contains "$out" "done without a pull request" "the blocked reading must name the missing pull request"
+  pass "worker-started validation: a done without a pull request reads blocked"
 }
 
 test_moved_remote_branch_without_named_head_is_blocked() {
@@ -5678,7 +5703,8 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
-test_no_mistakes_prevalidation_done_stays_done
+test_legacy_no_mistakes_handoff_done_stays_done
+test_worker_started_validation_done_without_pr_is_blocked
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane

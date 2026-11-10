@@ -2508,8 +2508,9 @@ crew_absorb_class() {  # <id>
 # may additionally absorb a bare turn-end on bounded pane churn, while every other
 # failed verdict surfaces
 # because the crew may be done, waiting on a decision, or wedged. For stale panes
-# it is checked before trusting the status log so a pre-validation captain-relevant
-# line does not override an active run. See crew_absorb_class for the exact
+# it is checked before trusting the status log so a leftover captain-relevant
+# line, such as the handoff done of a task launched with the older no-mistakes
+# contract, does not override an active run. See crew_absorb_class for the exact
 # working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]

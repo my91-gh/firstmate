@@ -22,7 +22,8 @@
 # never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode, --yolo, and the ship branch resolved from
-# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
+# --branch-prefix are written into the meta alongside the kind= flip, with the
+# rendered contract's validation_start= (bin/fm-dod-lib.sh). Firstmate resolves all three at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks that posture
 # up. The registry IS read for one thing only: the project's forge binding, which
@@ -373,13 +374,15 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^upstream_consent=' "$META" > "$TMP"
+PROMOTE_VALIDATION_START=$(fm_dod_contract_validation_start "$INSTRUCTIONS")
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^upstream_consent=' -e '^validation_start=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ -z "$PROMOTE_VALIDATION_START" ] || echo "validation_start=$PROMOTE_VALIDATION_START"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
