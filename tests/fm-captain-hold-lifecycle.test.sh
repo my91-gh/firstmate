@@ -2777,9 +2777,18 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "could not release the approved merge"
   show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  # Cleanup records the PR as delivered only on a forge-proved merge.
+  cat > "$home/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\t%s\t%s\n' MERGED '$(git -C "$wt" rev-parse HEAD)' '$approved_pr'; exit 0 ;;
+esac
+exit 0
+SH
   run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
+  fm_fake_exit0 "$home/fakebin" gh
 
   local_id=sample-released-local
   local_repo="$home/projects/sample-local"
