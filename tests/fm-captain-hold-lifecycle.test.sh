@@ -3065,6 +3065,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
+  # The change is landed: the delivery gate reads its MERGED status from gerrit-axi.
+  cat > "$home/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$home/fakebin/gerrit-axi"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -3313,6 +3319,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
+  # The change is landed: the delivery gate reads its MERGED status from gerrit-axi.
+  cat > "$home/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$home/fakebin/gerrit-axi"
 
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "cleanup of a captain-held Gerrit task failed: $(cat "$home/teardown.err")"
@@ -3356,6 +3368,14 @@ test_merge_approval_releases_before_zero_done_retention() {
     "merge approval completed the zero-retention row before landing"
   assert_contains "$show" "Resolution mode: released" \
     "merge approval did not record the existing release mode"
+  # Cleanup records the PR as delivered only on a forge-proved merge.
+  cat > "$home/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\t%s\t%s\n' MERGED '$(git -C "$wt" rev-parse HEAD)' '$pr'; exit 0 ;;
+esac
+exit 0
+SH
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
   assert_no_grep "$id" "$home/data/backlog.md" \
