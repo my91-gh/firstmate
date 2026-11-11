@@ -911,6 +911,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+  # The delivery gate reads the change status from gerrit-axi; MERGED is the proof.
+  cat > "$case_dir/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$case_dir/fakebin/gerrit-axi"
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -926,6 +932,7 @@ SH
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
     | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
@@ -940,6 +947,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
@@ -2096,7 +2104,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   add_failing_truncate_perl "$case_dir"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" "windowless-retry: an unrecordable close must fail the first attempt"
@@ -2201,7 +2209,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
 
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -2215,7 +2223,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
     || fail "legacy-stamp-rollback: the failed teardown closed the backlog item anyway"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2254,7 +2262,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   add_failing_truncate_perl "$case_dir"
 
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2270,7 +2278,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   # dead-or-agent-less endpoint gate onto a reused endpoint.
   add_unreadable_tmux "$case_dir"
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2285,7 +2293,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
     || fail "legacy-stamp-retained: the endpoint refusal closed the backlog item anyway"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout3" 2> "$case_dir/stderr3"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout3" 2> "$case_dir/stderr3"
   rc=$?
   set -e
   expect_code 1 "$rc" \
