@@ -985,6 +985,8 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+  # The row closes as delivered only because the forge proves the merge.
+  add_glab_mr_for_head "$case_dir" merged "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitLab task failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -1002,6 +1004,10 @@ SH
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+    case "$url" in
+      https://github.com/*) add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)" ;;
+      *) add_tea_pull_for_head "$case_dir" true "$(git -C "$case_dir/wt" rev-parse HEAD)" https://forgejo.example.com ;;
+    esac
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -1594,13 +1600,13 @@ test_squash_merged_rebased_branch_allows() {
 
 # Override tea to answer one login for git.example.org and a pull request
 # read through "tea api" with the supplied merged flag and head.
-add_tea_pull_for_head() {
-  local case_dir=$1 merged=$2 head=$3
+add_tea_pull_for_head() {  # <case-dir> <merged> <head> [<login url>]
+  local case_dir=$1 merged=$2 head=$3 login_url=${4:-https://git.example.org}
   cat > "$case_dir/fakebin/tea" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tea.log"
 if [ "\${1:-} \${2:-}" = "login list" ]; then
-  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  printf '[\n  {\n    "name": "fj",\n    "url": "$login_url"\n  }\n]\n'
   exit 0
 fi
 [ "\${1:-}" = api ] || exit 1

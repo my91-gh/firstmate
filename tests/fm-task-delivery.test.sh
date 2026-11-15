@@ -662,7 +662,7 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   FM_HOME="$home" "$BRIEF" pr-manual-b2 proj --mode no-mistakes >/dev/null \
     || fail "a default no-mistakes brief should scaffold"
   plain="$home/data/pr-manual-b2/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes" "$plain" \
+  grep -qx "Delivery contract: mode=no-mistakes validation-start=worker" "$plain" \
     || fail "an absent pr token changed the default delivery contract line"
   assert_no_grep 'skip pr' "$plain" "an absent pr token changed the default brief"
   pass "fm-brief: pr=manual records its contract suffix, skips pr and ci, and hands the PR text to the worker"
