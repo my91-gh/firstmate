@@ -2242,10 +2242,10 @@ test_terminal_stale_surfaced() {
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
-# log gets no new entry once firstmate hands it to a no-mistakes validation
-# (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
-# pre-validation "done:" line as the LAST line for the run's entire (possibly
-# many-minutes) duration. stale_is_terminal alone has no run-step awareness and
+# log gets no new entry while its no-mistakes validation runs (AGENTS.md's
+# sparse status-reporting contract), so a task launched with the older contract
+# keeps showing its handoff "done:" line as the LAST line for the run's entire
+# (possibly many-minutes) duration. stale_is_terminal alone has no run-step awareness and
 # would treat that leftover as still-current every time the pane goes quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
 # must get a chance to override a captain-relevant-but-stale status line, exactly
@@ -2257,9 +2257,9 @@ test_stale_terminal_status_overridden_by_active_run() {
   window="test:fm-validating"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
-  # The crew reported done BEFORE firstmate triggered no-mistakes validation;
-  # this line never gets superseded by a newer status-log entry while the
-  # pipeline itself runs.
+  # Under the older contract the crew reported done BEFORE firstmate triggered
+  # no-mistakes validation; this line never gets superseded by a newer
+  # status-log entry while the pipeline itself runs.
   printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(watch_window_key "$window")

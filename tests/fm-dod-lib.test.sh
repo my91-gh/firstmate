@@ -308,15 +308,78 @@ test_moved_branch_without_named_head_is_refused() {
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_no_mistakes_prevalidation_done_is_not_gated() {
-  local repo wt
+# A task launched with the older contract, whose meta records no
+# validation_start=, keeps its handoff done ungated.
+test_legacy_no_mistakes_handoff_done_is_not_gated() {
+  local repo wt meta
   repo="$TMP_ROOT/preval-repo"
   wt="$TMP_ROOT/preval-wt"
+  meta="$TMP_ROOT/preval.meta"
   fm_git_worktree "$repo" "$wt" fm/preval
   git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
+  printf 'kind=ship\nmode=no-mistakes\n' > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' "$TMP_ROOT" preval "$meta" \
+    || fail "legacy no-mistakes handoff done: must not require named-head reachability"
   accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
-    || fail "no-mistakes pre-validation done: must not require named-head reachability"
-  pass "no-mistakes pre-validation done: is not gated"
+    || fail "a no-mistakes handoff done: read without a task record must keep the legacy reading"
+  pass "legacy no-mistakes handoff done: is not gated"
+}
+
+# Under the contract where the worker starts /no-mistakes itself, a done that
+# names no pull request is refused, even when its head is pushed; the CI-ready
+# done keeps the named-head gate.
+test_worker_started_validation_done_without_pr_is_refused() {
+  local repo wt meta sha reason rc mode
+  repo="$TMP_ROOT/selfstart-repo"
+  wt="$TMP_ROOT/selfstart-wt"
+  meta="$TMP_ROOT/selfstart.meta"
+  fm_git_worktree "$repo" "$wt" fm/selfstart
+  git -C "$wt" commit -q --allow-empty -m 'the fix'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/selfstart "$sha"
+  printf 'kind=ship\nmode=no-mistakes\nvalidation_start=worker\n' > "$meta"
+  for mode in no-mistakes ''; do
+    reason=$(accept_done ship "$mode" "$wt" "$repo" 'done: implementation complete' "$TMP_ROOT" selfstart "$meta")
+    rc=$?
+    [ "$rc" -eq 1 ] || fail "mode '$mode': a done without a pull request was accepted (exit $rc)"
+    case "$reason" in
+      "done without a pull request: "*) ;;
+      *) fail "mode '$mode': refusal did not name the missing pull request: $reason" ;;
+    esac
+  done
+  accept_done ship no-mistakes "$wt" "$repo" 'done: PR https://example.test/o/r/pull/9 checks green' "$TMP_ROOT" selfstart "$meta" \
+    || fail "a CI-ready done with a pushed head was refused under the worker-started contract"
+  git -C "$wt" commit -q --allow-empty -m 'after the run'
+  accept_done ship no-mistakes "$wt" "$repo" 'done: PR https://example.test/o/r/pull/9 checks green' "$TMP_ROOT" selfstart "$meta" >/dev/null \
+    && fail "a CI-ready done with an unpushed head was accepted under the worker-started contract"
+  pass "worker-started validation: a done without a pull request is refused, the CI-ready done is gated"
+}
+
+# The no-mistakes contract tells the worker to start /no-mistakes itself, holds
+# exactly one done instruction, and marks that on its Delivery contract line,
+# which fm_dod_contract_validation_start reads back.
+test_no_mistakes_dod_has_one_done_and_worker_start() {
+  local forge out dones mode
+  for forge in none forgejo gerrit; do
+    out="$TMP_ROOT/dod-start-$forge.md"
+    fm_dod_block no-mistakes dod-start-task fm/dod-start-task "$forge" > "$out" \
+      || fail "forge=$forge: no-mistakes DoD did not render"
+    # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+    dones=$(grep -c 'append `done \[at=<epoch>\]' "$out")
+    [ "$dones" -eq 1 ] || fail "forge=$forge: no-mistakes DoD holds $dones done instructions, want 1"
+    assert_grep 'run /no-mistakes yourself at once' "$out" "forge=$forge: DoD does not have the worker start /no-mistakes"
+    assert_grep 'append no status line for that step' "$out" "forge=$forge: DoD does not forbid a status line for the start"
+    assert_no_grep 'Firstmate will then instruct you' "$out" "forge=$forge: DoD still waits for firstmate to start validation"
+    [ "$(fm_dod_contract_validation_start "$out")" = worker ] \
+      || fail "forge=$forge: the Delivery contract line does not record validation-start=worker"
+  done
+  for mode in direct-PR local-only; do
+    out="$TMP_ROOT/dod-start-$mode.md"
+    fm_dod_block "$mode" dod-start-task > "$out"
+    [ -z "$(fm_dod_contract_validation_start "$out")" ] \
+      || fail "$mode: a contract without validation records validation-start"
+  done
+  pass "no-mistakes DoD holds one done instruction and has the worker start /no-mistakes"
 }
 
 test_local_only_linked_branch_is_accepted() {
@@ -673,9 +736,42 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+# Promotion records the rendered contract's validation_start= in the task meta,
+# so the ready-report gate reads a promoted task's done the way its new
+# instructions define it.
+test_promotion_records_validation_start() {
+  local home id meta out mode
+  home="$TMP_ROOT/promote-start-home"
+  for mode in no-mistakes direct-PR; do
+    id="promote-start-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nvalidation_start=stale\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1) \
+      || fail "promoting a scout to $mode failed: $out"
+    if [ "$mode" = no-mistakes ]; then
+      [ "$(fm_dod_meta_value "$meta" validation_start)" = worker ] \
+        || fail "a no-mistakes promotion did not record validation_start=worker"
+    else
+      assert_no_grep 'validation_start=' "$meta" "a $mode promotion kept a validation_start= record"
+    fi
+  done
+  pass "promotion records the contract's validation_start= in the task meta"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
-test_no_mistakes_prevalidation_done_is_not_gated
+test_legacy_no_mistakes_handoff_done_is_not_gated
+test_worker_started_validation_done_without_pr_is_refused
+test_no_mistakes_dod_has_one_done_and_worker_start
 test_remote_containing_named_head_is_accepted
 test_gate_mirror_only_named_head_is_refused
 test_head_pushed_from_gate_clone_is_accepted_after_refresh
@@ -701,6 +797,7 @@ test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
+test_promotion_records_validation_start
 
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must

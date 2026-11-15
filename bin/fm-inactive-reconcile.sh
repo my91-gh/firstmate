@@ -19,9 +19,11 @@
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
-# pre-validation `done: {summary}` still reads done (the pipeline handoff),
-# while a CI-ready or direct-PR/local-only done whose head lives only in the
-# disposable copy reads blocked and is not a terminal inactive outcome.
+# `done: {summary}` that names no PR still reads done (the pipeline handoff)
+# only for a task launched with the older contract, while a no-mistakes done
+# without a pull request from a task recording validation_start=worker, or a
+# CI-ready or direct-PR/local-only done whose head lives only in the
+# disposable copy, reads blocked and is not a terminal inactive outcome.
 # Neither path refreshes remote-tracking refs before that gate: it runs under
 # the child's meta lock inside a scan budget of at most 30 seconds, which a
 # fetch bounded at 30 seconds per remote does not fit. The home's own

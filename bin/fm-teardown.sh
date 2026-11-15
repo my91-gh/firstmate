@@ -209,11 +209,22 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--pr-still-open]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
 #   captain has explicitly said to discard the work.
+#   --pr-still-open accepts a ship task whose recorded pull request is not
+#   proven merged (an abandoned task, or a contribution that waits for other
+#   maintainers). Without a proved merge, teardown REFUSES such a task before any
+#   destructive step: the safety gate above answers "can this copy be deleted
+#   without losing work", and a pushed branch with an open pull request passes
+#   it, so a second delivery gate answers "was it delivered". Proof is the
+#   pull request's merge read from its forge (pr_is_merged, then the provider's
+#   own read). With the flag, or with --force, the cleanup continues but the
+#   backlog row never carries the pull request as a delivered link and never
+#   reads "merged": it records a note that the pull request is still open.
+#   The gate covers ship tasks that are not local-only and have a recorded pr=.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -543,11 +554,13 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+PR_STILL_OPEN_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --pr-still-open) PR_STILL_OPEN_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -1843,10 +1856,33 @@ work_is_landed() {
   content_in_default
 }
 
+# Is the recorded pull request proven merged? The delivery gate's one question,
+# separate from the safety gate's "can this copy be deleted without losing work".
+# pr_is_merged answers first (it also ties the merge to the local work); the
+# provider's own state read then covers a copy that is gone or diverged and the
+# GitLab and Gerrit changes pr_is_merged cannot read. Anything unreadable is
+# "not proven", so a forge error refuses rather than records a delivery.
+pr_merge_proven() {
+  local branch=$1
+  [ -n "$PR_URL" ] || return 1
+  pr_is_merged "$branch" && return 0
+  fm_pr_url_parse "$PR_URL" || return 1
+  case "$FM_PR_PROVIDER" in
+    github) fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" ;;
+    gitlab) fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ;;
+    forgejo) fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" ;;
+    gerrit) fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" ;;
+    *) return 1 ;;
+  esac || return 1
+  [ "$FM_PR_RECORD_MERGED" = true ]
+}
+
 # The completion links this teardown already holds locally. A retained scout
 # keeps its report as the held deliverable, while a force-closed scout is
 # recorded as discarded with no report. A local-only ship lands on local main,
-# and every other ship carries the PR recorded on its own record.
+# and every other ship carries the PR recorded on its own record as a delivered link
+# only when the delivery gate proved the merge; otherwise the PR is recorded as
+# a note that it is still open, so the row never reads "merged" for an open PR.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1868,8 +1904,10 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
+      elif [ -n "$PR_URL" ] && [ "$PR_MERGE_PROVEN" = 1 ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      elif [ -n "$PR_URL" ]; then
+        BACKLOG_DONE_ARGS=(--pr-open "$PR_URL")
       fi
       ;;
   esac
@@ -3823,6 +3861,24 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+# Delivery gate: the safety gate above only proves no work is lost, and a pushed
+# branch with an open pull request passes it. A ship with a recorded pull request
+# therefore also needs a merge proof before any destructive step, or the explicit
+# --pr-still-open (--force is the existing discard authority and also continues).
+# Either way, backlog_done_args records the pull request as delivered only when
+# the merge is proved.
+PR_MERGE_PROVEN=0
+if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ -n "$PR_URL" ]; then
+  delivery_branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if pr_merge_proven "$delivery_branch"; then
+    PR_MERGE_PROVEN=1
+  elif [ "$PR_STILL_OPEN_GIVEN" != 1 ] && [ "$FORCE" != "--force" ]; then
+    echo "REFUSED: task $ID's pull request $PR_URL is not proven merged, so cleanup would record unmerged work as delivered. Nothing was changed." >&2
+    echo "Merge it first (bin/fm-pr-merge.sh $ID $PR_URL), or rerun with --pr-still-open when the task is abandoned or the contribution waits for other maintainers; the backlog row then records the pull request as still open, never as merged." >&2
+    exit 1
   fi
 fi
 

@@ -195,7 +195,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode brief status contract
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -207,7 +207,9 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
-    grep -qx "Delivery contract: mode=$mode" "$brief" \
+    contract="Delivery contract: mode=$mode"
+    [ "$mode" != no-mistakes ] || contract="$contract validation-start=worker"
+    grep -qx "$contract" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
@@ -270,7 +272,7 @@ test_forge_selection_renders_correct_cli() {
   brief="$home/data/brief-forge-nm/brief.md"
   assert_grep "3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
     "a no-mistakes --forge forgejo brief must render the tea Rule 3 line"
-  grep -qx "Delivery contract: mode=no-mistakes forge=forgejo" "$brief" \
+  grep -qx "Delivery contract: mode=no-mistakes forge=forgejo validation-start=worker" "$brief" \
     || fail "a no-mistakes --forge forgejo brief must mark the delivery contract line"
   # shellcheck disable=SC2016 # Backticks and braces are literal generated brief text.
   assert_grep 'confirm it is not a draft (`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>` must show `draft` as false' "$brief" \
@@ -391,9 +393,9 @@ test_ship_mode_is_explicit_not_registry() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
+  grep -qx "Delivery contract: mode=no-mistakes validation-start=worker" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "run /no-mistakes yourself at once" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
