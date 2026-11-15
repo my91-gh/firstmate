@@ -1068,6 +1068,17 @@ await fire("before_agent_start", {
   message: { role: "custom", customType: "fixture", content: "custom content must not become captain dialog", display: true },
 }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+// Pi 1.2's idle sendMessage trigger carries a CustomMessage, not a prompt.
+// Even report-request wording in it must never become captain dialog.
+await fire("before_agent_start", {
+  type: "before_agent_start",
+  messageType: "custom",
+  message: {
+    role: "custom", customType: "fixture", content: explicitRequest,
+    display: false, timestamp: Date.now(),
+  },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, mainCtx);
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
@@ -1125,6 +1136,7 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
 }
 if (mirroredCaptainText.some((text) =>
+  text === `[captain] ${explicitRequest}` ||
   text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report") ||
   text.includes("custom content must not become captain dialog")
 )) {
@@ -2145,7 +2157,6 @@ for (const event of [
   await fire("before_agent_start", event, abortCtx);
   contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
   await fire("agent_start", {}, defaultSessionCtx);
-  if (event.messageType === "custom") await fire("message_start", { message: processingMsg }, abortCtx);
   const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
   if (!aborted) throw new Error(`a dedicated ${event.messageType ?? "legacy"} processing turn with history was not aborted under the record`);
   if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
@@ -2153,6 +2164,47 @@ for (const event of [
   }
   await fire("agent_end", {});
 }
+for (const message of [
+  { ...processingMsg, customType: "fixture" },
+  { ...processingMsg, content: "different processing request" },
+]) {
+  aborted = false;
+  await fire("before_agent_start", {
+    type: "before_agent_start", messageType: "custom", message,
+    systemPrompt: "fixture", systemPromptOptions: {},
+  }, abortCtx);
+  const unrelated = await fire("context", { messages: [...history, message, processingMsg] }, abortCtx);
+  if (aborted) throw new Error("an unrelated custom run was aborted after a processing request joined it");
+  if (unrelated?.messages?.some((item) => item.customType === "fm-branch-process")) {
+    throw new Error(`joined processing was not stripped from a custom run: ${JSON.stringify(unrelated)}`);
+  }
+}
+aborted = false;
+await fire("before_agent_start", { messageType: "custom", message: processingMsg }, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
+if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+}
+await fire("agent_end", {});
+contract(["archive"]);
+aborted = false;
+await fire("before_agent_start", {
+  type: "before_agent_start", messageType: "custom",
+  message: { ...processingMsg, timestamp: Date.now() },
+  systemPrompt: "fixture", systemPromptOptions: {},
+}, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+await fire("turn_start", {});
+await fire("message_start", { message: processingMsg }, abortCtx);
+contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
+const openedByCustomRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a custom processing turn with history was not aborted when the record appeared");
+if (openedByCustomRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`custom processing with history was not stripped: ${JSON.stringify(openedByCustomRequest)}`);
+}
+await fire("agent_end", {});
 await fire("agent_settled", {});
 if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Error(`the record moved the processed marker: ${unprocessedSeqs()}`);
@@ -4419,6 +4471,51 @@ EOF
   pass "branch activates on a cold start once the lock is acquired, never before"
 }
 
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly. The branch activates for its own
+# tagged lock and never for a malformed tag or for any tag off Windows. Each run
+# sets the platform for the whole process so every host exercises both sides.
+test_branch_activates_for_a_windows_tagged_session_lock() {
+  local repo home platform out status
+  for platform in win32 linux; do
+    repo="$TMP_ROOT/tagged-lock-$platform-root"
+    home="$TMP_ROOT/tagged-lock-$platform-home"
+    mkdir -p "$home/state" "$home/config"
+    install_pi_branch_extension_fixture "$repo"
+    PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_TEST_SKIP_LOCK=1 FM_TEST_PLATFORM="$platform" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+      node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+Object.defineProperty(process, "platform", { ...platform, value: process.env.FM_TEST_PLATFORM });
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, defaultSessionCtx } = globalThis.__t;
+const marker = `${home}/state/.pi-branch-extension-loaded`;
+
+writeFileSync(`${home}/state/.lock`, `win:${process.pid}x\n`);
+await fire("session_start", {}, defaultSessionCtx);
+if (dispatch("signal: malformed tag").accepted) throw new Error("branch accepted a wake under a malformed tagged lock");
+writeFileSync(`${home}/state/.lock`, `win:${process.pid}\n`);
+await fire("turn_end", {}, defaultSessionCtx);
+const accepted = dispatch("signal: tagged lock").accepted;
+if (process.platform !== "win32") {
+  if (accepted) throw new Error("branch accepted a wake under a tagged lock off Windows");
+  if (existsSync(marker)) throw new Error("branch wrote its marker under a tagged lock off Windows");
+  process.exit(0);
+}
+if (!accepted) throw new Error("branch refused a wake under its own Windows-tagged lock");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "tagged-lock branch wake prompt");
+if (!existsSync(marker)) throw new Error("owned tagged activation did not write the diagnostic marker");
+process.exit(0);
+EOF
+    status=$?
+    out=$(cat "$TMP_ROOT/node-output")
+    expect_code 0 "$status" "branch must read a Windows-tagged session lock only on Windows ($platform): $out"
+  done
+  pass "branch activates for its own Windows-tagged session lock only on Windows, never for a malformed tag"
+}
+
 test_queued_actions_recheck_lock_ownership() {
   local repo home out status
   repo="$TMP_ROOT/queued-ownership-root"
@@ -6179,6 +6276,7 @@ test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
+test_branch_activates_for_a_windows_tagged_session_lock
 test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
