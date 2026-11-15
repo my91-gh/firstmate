@@ -390,7 +390,9 @@ STUB
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
 
-    grep -qx "Delivery contract: mode=$mode" "$payload" \
+    contract="Delivery contract: mode=$mode"
+    [ "$mode" != no-mistakes ] || contract="$contract validation-start=worker"
+    grep -qx "$contract" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
@@ -1500,7 +1502,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   FM_HOME="$home" "$BRIEF" forge-dod-g1 review-server-project --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit no-mistakes brief should scaffold"
   brief="$home/data/forge-dod-g1/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash" "$brief" \
+  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash validation-start=worker" "$brief" \
     || fail "the brief did not record the machine-readable forge in its delivery contract"
 
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1795,7 +1797,7 @@ STUB
        eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
     || fail "promotion's delivery command did not run"
   assert_present "$payload" "promotion delivered no message to the worker"
-  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash" "$payload" \
+  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash validation-start=worker" "$payload" \
     || fail "the promoted worker did not receive the forge in its delivery contract"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Pass `--skip push,pr,ci` on every `no-mistakes axi run` for this task' "$payload" \

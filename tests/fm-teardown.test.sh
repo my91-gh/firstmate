@@ -283,6 +283,49 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# Override GitHub lookups to report PR 7 as still OPEN, whatever the call: the
+# state/head/url view, the GraphQL state read, and the gh-axi view all agree.
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+    esac
+    ;;
+  "api graphql") printf '%s\n' 'state=OPEN' 'merged=false' ; exit 0 ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# A ship task whose pull request is recorded and still OPEN, pushed branch and
+# all: the safety gate passes, so only the delivery gate can refuse it.
+# Echoes the case directory.
+make_open_pr_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  add_gh_pr_open_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf '%s\n' "$case_dir"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -747,6 +790,8 @@ test_teardown_closes_the_backlog_item_itself() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  # The row closes with the PR link only because the forge proves the merge.
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -762,6 +807,106 @@ test_teardown_closes_the_backlog_item_itself() {
   printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
     && fail "teardown still asked a later turn to close the item it already closed: $out"
   pass "teardown closes its own backlog item before reporting success"
+}
+
+test_teardown_refuses_an_open_pull_request() {
+  local case_dir rc
+  case_dir=$(make_open_pr_case open-pr-refuse)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr: teardown must refuse a ship whose pull request is not merged"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/stderr" \
+    "open-pr: the refusal did not name the open pull request"
+  assert_grep 'fm-pr-merge.sh' "$case_dir/stderr" \
+    "open-pr: the refusal did not offer to merge first"
+  assert_grep 'pr-still-open' "$case_dir/stderr" \
+    "open-pr: the refusal did not offer the explicit flag"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "open-pr: the refused teardown moved the backlog row to $(backlog_row_state "$case_dir")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "open-pr: the refused teardown removed the task record the merge script needs"
+  assert_present "$case_dir/wt" "open-pr: the refused teardown removed the isolated copy"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "open-pr: the refused teardown left a pending-close record"
+  pass "teardown refuses a ship whose recorded pull request is still open, before any destructive step"
+}
+
+test_teardown_cannot_prove_the_merge_refuses() {
+  local case_dir rc
+  case_dir=$(make_case open-pr-unproved)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  # The default gh mocks answer "pull request not found" for every read.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-unproved: teardown must refuse when no read proves the merge"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "open-pr-unproved: the refused teardown moved the backlog row"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "open-pr-unproved: the refused teardown removed the task record"
+  pass "teardown refuses a recorded pull request whose merge no forge read can prove"
+}
+
+test_teardown_pr_still_open_flag_closes_the_row_without_merged_wording() {
+  local case_dir out
+  case_dir=$(make_open_pr_case open-pr-flag)
+
+  out=$(run_teardown "$case_dir" --pr-still-open 2>&1) \
+    || fail "open-pr-flag: --pr-still-open should let the cleanup continue: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "open-pr-flag: the row was not closed: $(backlog_row_state "$case_dir")"
+  ! grep -q 'merged' "$case_dir/data/backlog.md" \
+    || fail "open-pr-flag: the row claims a merge while the pull request is open: $(cat "$case_dir/data/backlog.md")"
+  ! tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full | grep -q 'pr:https://github.com' \
+    || fail "open-pr-flag: the row carries the open pull request as a delivered pr link"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "open-pr-flag: the row did not keep the open pull request as a note"
+  assert_grep 'PR still open' "$case_dir/data/backlog.md" \
+    "open-pr-flag: the row note does not say the pull request is open"
+  assert_absent "$case_dir/state/task-x1.meta" "open-pr-flag: the task record was not removed"
+  pass "--pr-still-open continues and closes the row with the pull request as an open note, never as merged"
+}
+
+test_teardown_force_with_an_open_pull_request_never_records_merged() {
+  local case_dir out
+  case_dir=$(make_open_pr_case open-pr-force)
+
+  out=$(run_teardown "$case_dir" --force 2>&1) \
+    || fail "open-pr-force: --force should keep discarding work as before: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "open-pr-force: the row was not closed: $(backlog_row_state "$case_dir")"
+  ! grep -q 'merged' "$case_dir/data/backlog.md" \
+    || fail "open-pr-force: --force recorded a merge for an open pull request: $(cat "$case_dir/data/backlog.md")"
+  ! tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full | grep -q 'pr:https://github.com' \
+    || fail "open-pr-force: the row carries the open pull request as a delivered pr link"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "open-pr-force: the row did not keep the open pull request as a note"
+  pass "--force keeps discarding work but never records an open pull request as merged"
+}
+
+test_teardown_pr_still_open_flag_does_not_hide_a_merged_pull_request() {
+  local case_dir out
+  case_dir=$(make_case open-pr-flag-merged)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  out=$(run_teardown "$case_dir" --pr-still-open 2>&1) \
+    || fail "open-pr-flag-merged: teardown failed: $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
+    || fail "open-pr-flag-merged: a proved merge no longer closed with the pr link"
+  pass "a proved merge still closes with the pull request link even when --pr-still-open is passed"
 }
 
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
@@ -787,6 +932,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+  # The delivery gate reads the change status from gerrit-axi; MERGED is the proof.
+  cat > "$case_dir/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"changes":[{"change":12345,"status":"MERGED"}]}'
+SH
+  chmod +x "$case_dir/fakebin/gerrit-axi"
 
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -802,6 +953,7 @@ SH
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
     | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
@@ -865,6 +1017,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
@@ -2571,7 +2724,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   add_failing_truncate_perl "$case_dir"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" "windowless-retry: an unrecordable close must fail the first attempt"
@@ -2676,7 +2829,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
 
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -2690,7 +2843,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
     || fail "legacy-stamp-rollback: the failed teardown closed the backlog item anyway"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2729,7 +2882,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   add_failing_truncate_perl "$case_dir"
 
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2745,7 +2898,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   # dead-or-agent-less endpoint gate onto a reused endpoint.
   add_unreadable_tmux "$case_dir"
   set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  run_teardown "$case_dir" --legacy-record --pr-still-open > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -2760,7 +2913,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
     || fail "legacy-stamp-retained: the endpoint refusal closed the backlog item anyway"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout3" 2> "$case_dir/stderr3"
+  run_teardown "$case_dir" --pr-still-open > "$case_dir/stdout3" 2> "$case_dir/stderr3"
   rc=$?
   set -e
   expect_code 1 "$rc" \
@@ -6593,6 +6746,11 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_refuses_an_open_pull_request
+test_teardown_cannot_prove_the_merge_refuses
+test_teardown_pr_still_open_flag_closes_the_row_without_merged_wording
+test_teardown_force_with_an_open_pull_request_never_records_merged
+test_teardown_pr_still_open_flag_does_not_hide_a_merged_pull_request
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
