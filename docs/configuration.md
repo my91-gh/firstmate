@@ -500,6 +500,17 @@ Completion refuses to report success until the item is closed, and session start
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 
+### Start times
+
+A queued backlog item can carry a start time, so a dispatch waits for a clock time without a worker starting early.
+`bin/fm-start-time.sh set <id> <time>` and `clear <id>` write and remove it through `bin/fm-tasks-axi.sh`; the time is an absolute instant, `Z` or an explicit offset is required, and it is stored in UTC.
+tasks-axi has no start-time field, so the instant is the first body line, `fm-start-after=<UTC instant>`, and the rest of the body is kept.
+Before that instant, `bin/fm-spawn.sh` launches nothing, creates no record, leaves the item queued, prints one `deferred:` line naming the time, and exits 75, the same status as a capacity deferral.
+Each watcher check sweep (`FM_CHECK_INTERVAL`, default 300 seconds) queues one `check: start-time:` wake naming each queued item whose time has arrived, so the wake follows the time by at most one sweep; the supervisor then dispatches the item.
+`state/<id>.start-time-notified` records the instant already announced, so a repeat sweep is silent and a new `set` re-arms the wake.
+A start time never changes captain-hold semantics: `hold --until` stays a date for captain calls.
+The [script header](../bin/fm-start-time.sh) owns the subcommands and exit statuses, and [`tests/fm-start-time.test.sh`](../tests/fm-start-time.test.sh) pins the behavior.
+
 ### Which backlog receives a transition
 
 Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.

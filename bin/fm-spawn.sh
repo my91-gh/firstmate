@@ -255,6 +255,9 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   either capacity.
+#   Start time: a fresh spawn whose backlog item carries a start time still in
+#   the future (bin/fm-start-time.sh owns the field) prints `deferred:` naming
+#   it and exits 75 with the item still queued, before any endpoint or record.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -4239,6 +4242,23 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
+fi
+# Start time (bin/fm-start-time.sh owns the field): a fresh worker whose
+# backlog item is not due yet is deferred before any brief render, endpoint,
+# worktree, record, or backlog move exists, like a capacity deferral, so the
+# item stays exactly as queued and exit 75 means dispatch it again later. Any
+# other gate status except an unreadable stored time falls through to the
+# backlog preflight below, which reports a missing or unreadable item itself.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+  START_TIME_STATUS=0
+  FM_HOME=$FM_HOME FM_DATA_OVERRIDE=$DATA "$SCRIPT_DIR/fm-start-time.sh" gate "$ID" || START_TIME_STATUS=$?
+  case "$START_TIME_STATUS" in
+    75) exit 75 ;;
+    3)
+      echo "error: spawn refused: task $ID's backlog item carries a start time that cannot be read; fix it with bin/fm-start-time.sh set or clear" >&2
+      exit 1
+      ;;
+  esac
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker

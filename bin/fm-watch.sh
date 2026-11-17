@@ -4221,6 +4221,11 @@ while :; do
       [ -z "$FM_CHECK_RESULT" ] || pr_register_reason="check: pr-register: $FM_CHECK_RESULT"
       [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
+    # A queued item whose start time (bin/fm-start-time.sh) has arrived: the
+    # scan queued one wake per arrival itself, so a repeat sweep stays silent.
+    start_time_reason=
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" run_check_capture "$SCRIPT_DIR/fm-start-time.sh" scan || exit 1
+    [ -z "$FM_CHECK_RESULT" ] || start_time_reason="check: start-time: $(printf '%s' "$FM_CHECK_RESULT" | paste -sd ';' - | sed 's/;/; /g')"
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -4434,6 +4439,7 @@ EOF
     fi
     touch "$STATE/.last-check"
     [ -z "$pr_register_reason" ] || wake "$pr_register_reason"
+    [ -z "$start_time_reason" ] || wake "$start_time_reason"
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
     fi
